@@ -157,17 +157,27 @@ _Noreturn void app_main(void) {
   ESP_LOGI(__FILENAME__, "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
 
   // 启动 LVGL widgets demo
-#if LV_USE_DEMO_WIDGETS
-  ESP_LOGI(__FILENAME__, "Starting LVGL Widgets Demo");
-  lv_demo_widgets();
-#else
-  // 如果没有启用 demo widgets，显示简单的 Hello world
-  lv_obj_t *label = lv_label_create(lv_scr_act());
-  if (NULL != label) {
-    lv_label_set_text(label, "Hello world\nLV_USE_DEMO_WIDGETS is disabled.\nEnable it in menuconfig.");
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-  }
-#endif
+// #if LV_USE_DEMO_WIDGETS
+//   ESP_LOGI(__FILENAME__, "Starting LVGL Widgets Demo");
+//   lv_demo_widgets();
+// #else
+//   // 如果没有启用 demo widgets，显示简单的 Hello world
+//   lv_obj_t *label = lv_label_create(lv_scr_act());
+//   if (NULL != label) {
+//     lv_label_set_text(label, "Hello world\nLV_USE_DEMO_WIDGETS is disabled.\nEnable it in menuconfig.");
+//     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+//   }
+// #endif
+static lv_obj_t * tv;
+
+    tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 45);
+
+        lv_obj_t * tab_btns = lv_tabview_get_tab_btns(tv);
+        lv_obj_set_style_pad_left(tab_btns, LV_HOR_RES , 0);
+        lv_obj_t * logo = lv_img_create(tab_btns);
+        LV_IMG_DECLARE(img_lvgl_logo);
+        lv_img_set_src(logo, &img_lvgl_logo);
+        lv_obj_align(logo, LV_ALIGN_LEFT_MID, -LV_HOR_RES + 25, 0);
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(1000));
