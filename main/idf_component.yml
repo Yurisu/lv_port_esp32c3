@@ -15,7 +15,7 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
 
-  lvgl/lvgl: ">=8.3"
+  lvgl/lvgl: ^8.3.*
 
   BunnySakura/lvgl_esp32_drivers:
     git: https://github.com/BunnySakura/lvgl_esp32_drivers.git
