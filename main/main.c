@@ -22,6 +22,8 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "lvgl_helpers.h"
+#include "lv_port_fs.h"
+
 
 // 包含 LVGL demos（如果启用了的话）
 #if LV_USE_DEMO_WIDGETS
@@ -116,6 +118,8 @@ _Noreturn void app_main(void) {
    */
   lv_init();
   lvgl_driver_init();
+  lv_port_fs_init();
+  
   lv_color_t *buf1 =
       heap_caps_malloc(DISP_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA);
   assert(buf1 != NULL);
