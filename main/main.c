@@ -30,7 +30,7 @@
     #include "demos/lv_demos.h"
 #endif
 
-#define LED_4 12
+#define LED_4 6
 #define LED_5 13
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
@@ -101,7 +101,7 @@ _Noreturn void BlinkLed(void *params) {
 _Noreturn void app_main(void) {
 
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
-  xTaskCreate(BlinkLed, "BlinkLed", 1024 * 4, NULL, 1, NULL);
+  //xTaskCreate(BlinkLed, "BlinkLed", 1024 * 4, NULL, 1, NULL);
 
   fflush(stdout);
 
@@ -119,7 +119,7 @@ _Noreturn void app_main(void) {
   lv_init();
   lvgl_driver_init();
   lv_port_fs_init();
-  
+
   lv_color_t *buf1 =
       heap_caps_malloc(DISP_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA);
   assert(buf1 != NULL);
@@ -160,6 +160,12 @@ _Noreturn void app_main(void) {
 
   ESP_LOGI(__FILENAME__, "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
 
+
+
+
+
+
+
   // 启动 LVGL widgets demo
 // #if LV_USE_DEMO_WIDGETS
 //   ESP_LOGI(__FILENAME__, "Starting LVGL Widgets Demo");
@@ -176,12 +182,55 @@ static lv_obj_t * tv;
 
     tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 45);
 
+        // lv_obj_t * tab_btns = lv_tabview_get_tab_btns(tv);
+        // lv_obj_set_style_pad_left(tab_btns, LV_HOR_RES , 0);
+        // lv_obj_t * logo = lv_img_create(tab_btns);
+        // LV_IMG_DECLARE(img_lvgl_logo);
+        // lv_img_set_src(logo, &img_lvgl_logo);
+        // lv_obj_align(logo, LV_ALIGN_LEFT_MID, -LV_HOR_RES + 25, 0);
+
+
         lv_obj_t * tab_btns = lv_tabview_get_tab_btns(tv);
         lv_obj_set_style_pad_left(tab_btns, LV_HOR_RES , 0);
-        lv_obj_t * logo = lv_img_create(tab_btns);
-        LV_IMG_DECLARE(img_lvgl_logo);
-        lv_img_set_src(logo, &img_lvgl_logo);
-        lv_obj_align(logo, LV_ALIGN_LEFT_MID, -LV_HOR_RES + 25, 0);
+
+        // 创建第一个标签页
+        lv_obj_t *tab1 = lv_tabview_add_tab(tv, "Images");
+
+        // 在标签页中创建图片
+        lv_obj_t * logo = lv_img_create(tab1);
+
+        // 尝试从 LittleFS 加载图片
+        // 盘符: A:, 挂载路径: /littlefs
+        // 路径格式: A:/文件名  或  A:/littlefs/文件名
+        lv_img_set_src(logo, "A:/esp_logo.jpg");
+
+        // 检查图片是否加载成功
+        const void *src = lv_img_get_src(logo);
+        if (src != NULL) {
+            ESP_LOGI(__FILENAME__, "Image loaded successfully: A:/esp_logo.png");
+            lv_obj_center(logo);
+        } else {
+            ESP_LOGE(__FILENAME__, "Failed to load image: A:/esp_logo.png");
+
+
+        }
+
+    // lv_gif_set_src(gif, "S:/xxx.gif");
+    // lv_obj_t *scr = lv_obj_create(NULL);
+    //  lv_obj_t *obpng = lv_img_create(scr);
+    //  lv_obj_set_pos(obpng, 30, 30);
+    //  lv_img_set_src(obpng, "C:/1.bmp");
+    //  //lv_scr_load(scr);
+    //  vTaskDelay(pdMS_TO_TICKS(1000));
+    //     lv_scr_load(lv_scr_act());
+    // vTaskDelay(pdMS_TO_TICKS(1000));
+    //     lv_refr_now(lv_disp_get_default());
+    // vTaskDelay(pdMS_TO_TICKS(1000));
+
+
+
+
+
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(1000));

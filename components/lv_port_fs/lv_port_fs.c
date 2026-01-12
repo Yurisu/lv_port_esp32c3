@@ -56,7 +56,7 @@ void lv_port_fs_init(void)
     static lv_fs_drv_t fs_drv;
     lv_fs_drv_init(&fs_drv);  // 初始化 LVGL 文件系统驱动结构体
 
-    fs_drv.letter = 'S';      // 设置 LVGL 中访问的盘符，如 S:/path/to/file
+    fs_drv.letter = 'A';      // 设置 LVGL 中访问的盘符，如 S:/path/to/file
     fs_drv.open_cb = fs_open;
     fs_drv.close_cb = fs_close;
     fs_drv.read_cb = fs_read;
@@ -96,6 +96,20 @@ static void fs_init(void)
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "LittleFS Partition size: total: %d, used: %d", total, used);
     }
+
+    // 打印文件列表
+    DIR *dir = opendir("/littlefs");
+    if (dir == NULL) {
+        ESP_LOGE(TAG, "Failed to open directory");
+        return;
+    }
+ 
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        ESP_LOGI(TAG, "Found: %s", ent->d_name);
+    }
+    closedir(dir);
+
 }
 
 /* 文件操作实现 */
