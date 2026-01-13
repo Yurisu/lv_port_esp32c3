@@ -24,14 +24,25 @@
 #include "lvgl_helpers.h"
 #include "lv_port_fs.h"
 
+#include <mmc56x3.h>
+
+
+#include "rc522.h"
+#include "driver/rc522_i2c.h"
+#include "rc522_picc.h"
+
 
 // 包含 LVGL demos（如果启用了的话）
 #if LV_USE_DEMO_WIDGETS
     #include "demos/lv_demos.h"
 #endif
 
+#define I2C0_MASTER_PORT               I2C_NUM_0
+#define I2C0_MASTER_SDA_IO             GPIO_NUM_9 // blue
+#define I2C0_MASTER_SCL_IO             GPIO_NUM_8 // yellow
+
 #define LED_4 6
-#define LED_5 13
+#define LED_5 6
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
 
@@ -98,13 +109,241 @@ _Noreturn void BlinkLed(void *params) {
   }
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+#define I2C0_MASTER_CONFIG_DEFAULT {                                \
+        .clk_source                     = I2C_CLK_SRC_DEFAULT,      \
+        .i2c_port                       = I2C0_MASTER_PORT,         \
+        .scl_io_num                     = I2C0_MASTER_SCL_IO,       \
+        .sda_io_num                     = I2C0_MASTER_SDA_IO,       \
+        .glitch_ignore_cnt              = 7,                        \
+        .flags.enable_internal_pullup   = true, }
+
+
+// initialize master i2c 0 bus configuration
+i2c_master_bus_config_t  i2c0_bus_cfg = I2C0_MASTER_CONFIG_DEFAULT;
+i2c_master_bus_handle_t  i2c0_bus_hdl = NULL;
+
+void IIC_init(void) {
+    /* instantiate i2c master bus 0 */
+    ESP_ERROR_CHECK( i2c_new_master_bus(&i2c0_bus_cfg, &i2c0_bus_hdl) );
+
+    /* check i2c master bus handle instance */
+    if (i2c0_bus_hdl == NULL) {
+        ESP_LOGE("IIC", "i2c master bus handle init failed");
+        assert(i2c0_bus_hdl);
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+#define TSK_MINIMAL_STACK_SIZE         (1024)
+
+#define MMC_TASK_NAME                 "mmc_task"
+#define MMC_TASK_SAMPLING_RATE        (10000) 
+#define MMC_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 8)
+#define MMC_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
+
+#define MMC_TAG                         "MMC[APP]"
+
+
+
+
+void i2c0_mmc56x3_task( void *pvParameters ) {
+    // initialize the xLastWakeTime variable with the current time.
+    TickType_t         last_wake_time  = xTaskGetTickCount ();
+    //
+    // initialize i2c device configuration
+    mmc56x3_config_t dev_cfg       = I2C_MMC56X3_CONFIG_DEFAULT;
+    mmc56x3_handle_t dev_hdl;
+    //
+    // init device
+    mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
+    if (dev_hdl == NULL) {
+        ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
+        assert(dev_hdl);
+    }
+    //
+    //
+    // task loop entry point
+    for ( ;; ) {
+        ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
+        //
+        // handle sensor
+        mmc56x3_magnetic_axes_data_t magnetic_axes;
+        esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
+        if(result != ESP_OK) {
+            ESP_LOGE(MMC_TAG, "mmc56x3 device read failed (%s)", esp_err_to_name(result));
+        } else {
+            ESP_LOGI(MMC_TAG, "Compass X-Axis:  %f mG", magnetic_axes.x_axis);
+            ESP_LOGI(MMC_TAG, "Compass Y-Axis:  %f mG", magnetic_axes.y_axis);
+            ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
+            ESP_LOGI(MMC_TAG, "Compass Heading: %f °", mmc56x3_convert_to_heading(magnetic_axes));
+            ESP_LOGI(MMC_TAG, "True Heading:    %f °", mmc56x3_convert_to_true_heading(dev_hdl->dev_config.declination, magnetic_axes));
+        }
+        //
+        ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
+        //
+        //
+        // pause the task per defined wait period
+        //vTaskDelayUntil( &last_wake_time, MMC_TASK_SAMPLING_RATE );
+        vTaskDelay(MMC_TASK_SAMPLING_RATE / portTICK_PERIOD_MS);
+    }
+    //
+    // free resources
+    mmc56x3_delete( dev_hdl );
+    vTaskDelete( NULL );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// static const char *RC522_TAG = "rc522-basic-i2c-example";
+
+// #define RC522_I2C_ADDRESS      (0x28)
+// #define RC522_SCANNER_GPIO_RST (-1) // soft-reset
+// static rc522_i2c_config_t driver_config = {
+//     .port = I2C_NUM_0,
+//     .device_address = RC522_I2C_ADDRESS,
+//     .rw_timeout_ms = 1000,
+//     .config = {
+//         .mode = I2C_MODE_MASTER,
+//         .sda_io_num = RC522_I2C_GPIO_SDA,
+//         .scl_io_num = RC522_I2C_GPIO_SCL,
+//         .sda_pullup_en = GPIO_PULLUP_ENABLE,
+//         .scl_pullup_en = GPIO_PULLUP_ENABLE,
+//         .master.clk_speed = 100000,
+//     },
+//     .rst_io_num = RC522_SCANNER_GPIO_RST,
+// };
+
+// static rc522_driver_handle_t driver;
+// static rc522_handle_t scanner;
+
+// static void on_picc_state_changed(void *arg, esp_event_base_t base, int32_t event_id, void *data)
+// {
+//     rc522_picc_state_changed_event_t *event = (rc522_picc_state_changed_event_t *)data;
+
+//     if (event->picc->state != RC522_PICC_STATE_ACTIVE) {
+//         return;
+//     }
+
+//     rc522_picc_print(event->picc);
+// }
+
+// void app_RC522()
+// {
+//     rc522_i2c_create(&driver_config, &driver);
+//     rc522_driver_install(driver);
+
+//     rc522_config_t scanner_config = {
+//         .driver = driver,
+//     };
+
+//     rc522_create(&scanner_config, &scanner);
+//     rc522_register_events(scanner, RC522_EVENT_PICC_STATE_CHANGED, on_picc_state_changed, NULL);
+//     rc522_start(scanner);
+// }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 _Noreturn void app_main(void) {
+
+
+  IIC_init();
+
+  /* create task pinned to the app core */
+  //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
   //xTaskCreate(BlinkLed, "BlinkLed", 1024 * 4, NULL, 1, NULL);
-
   fflush(stdout);
-
   {
     TaskHandle_t print_chip_info_handle = xTaskGetHandle("PrintChipInfo");
     if (print_chip_info_handle != NULL) {
@@ -112,6 +351,17 @@ _Noreturn void app_main(void) {
       ESP_LOGI("app_main", "Task PrintChipInfo delete.");
     }
   }
+
+
+
+
+
+
+
+
+
+
+
 
   /**
    * \brief Start LVGL demo.
@@ -159,11 +409,6 @@ _Noreturn void app_main(void) {
   ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000));
 
   ESP_LOGI(__FILENAME__, "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
-
-
-
-
-
 
 
   // 启动 LVGL widgets demo
