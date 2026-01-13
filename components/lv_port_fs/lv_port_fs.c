@@ -139,7 +139,7 @@ static void * fs_open(lv_fs_drv_t * drv, const char * path, lv_fs_mode_t mode)
     }
 
     const char *mode_str = (mode & LV_FS_MODE_WR) ? "wb" : "rb";  // 写模式或读模式
-    ESP_LOGI(TAG, "open %s (%s)", filepath, mode_str);
+    //ESP_LOGI(TAG, "open %s (%s)", filepath, mode_str);
 
     FILE *f = fopen(filepath, mode_str);
     if (!f) {

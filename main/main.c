@@ -178,62 +178,41 @@ _Noreturn void app_main(void) {
 //     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 //   }
 // #endif
-static lv_obj_t * tv;
 
-    tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 45);
+    // 创建全屏背景图片
+    lv_obj_t *bg_img = lv_img_create(lv_scr_act());
 
-        // lv_obj_t * tab_btns = lv_tabview_get_tab_btns(tv);
-        // lv_obj_set_style_pad_left(tab_btns, LV_HOR_RES , 0);
-        // lv_obj_t * logo = lv_img_create(tab_btns);
-        // LV_IMG_DECLARE(img_lvgl_logo);
-        // lv_img_set_src(logo, &img_lvgl_logo);
-        // lv_obj_align(logo, LV_ALIGN_LEFT_MID, -LV_HOR_RES + 25, 0);
+    // 从 LittleFS 加载背景图片
+    lv_img_set_src(bg_img, "A:/1.sjpg");
+    const void *src = lv_img_get_src(bg_img);
+    lv_obj_set_size(bg_img, LV_HOR_RES, LV_VER_RES);
+    lv_obj_center(bg_img);
 
-
-        lv_obj_t * tab_btns = lv_tabview_get_tab_btns(tv);
-        lv_obj_set_style_pad_left(tab_btns, LV_HOR_RES , 0);
-
-        // 创建第一个标签页
-        lv_obj_t *tab1 = lv_tabview_add_tab(tv, "Images");
-
-        // 在标签页中创建图片
-        lv_obj_t * logo = lv_img_create(tab1);
-
-        // 尝试从 LittleFS 加载图片
-        // 盘符: A:, 挂载路径: /littlefs
-        // 路径格式: A:/文件名  或  A:/littlefs/文件名
-        lv_img_set_src(logo, "A:/esp_logo.jpg");
-
-        // 检查图片是否加载成功
-        const void *src = lv_img_get_src(logo);
-        if (src != NULL) {
-            ESP_LOGI(__FILENAME__, "Image loaded successfully: A:/esp_logo.png");
-            lv_obj_center(logo);
-        } else {
-            ESP_LOGE(__FILENAME__, "Failed to load image: A:/esp_logo.png");
-
-
-        }
-
-    // lv_gif_set_src(gif, "S:/xxx.gif");
-    // lv_obj_t *scr = lv_obj_create(NULL);
-    //  lv_obj_t *obpng = lv_img_create(scr);
-    //  lv_obj_set_pos(obpng, 30, 30);
-    //  lv_img_set_src(obpng, "C:/1.bmp");
-    //  //lv_scr_load(scr);
-    //  vTaskDelay(pdMS_TO_TICKS(1000));
-    //     lv_scr_load(lv_scr_act());
-    // vTaskDelay(pdMS_TO_TICKS(1000));
-    //     lv_refr_now(lv_disp_get_default());
-    // vTaskDelay(pdMS_TO_TICKS(1000));
+    // 创建显示开机时间的标签
+    static lv_obj_t *time_label;
+    time_label = lv_label_create(lv_scr_act());
+    if (time_label != NULL) {
+        lv_label_set_text(time_label, "Uptime: 0s");
+        lv_obj_set_style_text_color(time_label, lv_color_black(), 0);
+        lv_obj_set_style_text_font(time_label, &lv_font_montserrat_14, 0);//14/26/38
+        lv_obj_align(time_label, LV_ALIGN_TOP_MID, 0, 20);
+    }
 
 
 
 
 
+  uint32_t uptime_seconds = 0;
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // 更新开机时间显示
+    uptime_seconds++;
+    if (time_label != NULL) {
+        lv_label_set_text_fmt(time_label, "Uptime: %lus", uptime_seconds);
+    }
+
     lv_task_handler();
   }
 
