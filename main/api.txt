@@ -1,0 +1,154 @@
+用户要求我整理一个API文档，用一句话简介介绍每个函数。我需要查看文件中所有的函数，并为每个函数编写一句简短的说明。
+
+从文件中我可以看到以下主要函数：
+
+1. SI523_IIC_Init - 初始化SI523设备I2C接口
+2. I_SI523_IO_Write - 写SI523寄存器
+3. I_SI523_IO_Read - 读SI523寄存器
+4. SI523_Init - SI523设备初始化
+5. PcdAntennaOn - 开启天线
+6. PcdAntennaOff - 关闭天线
+7. CalulateCRC - 计算CRC16
+8. PcdComMF522 - 通过RC522和ISO14443卡通讯
+9. PcdRequest - 寻卡
+10. PcdAnticoll - 防冲撞
+11. PcdSelect - 选定卡片
+12. PcdSelect1 - 选定卡片（Level 1）
+13. PcdSelect2 - 选定卡片（Level 2）
+14. PcdSelect3 - 选定卡片（Level 3）
+15. PcdHalt - 命令卡片进入休眠状态
+16. PcdAuthState - 验证卡片密码
+17. PcdRead - 读取M1卡一块数据
+18. PcdWrite - 写数据到M1卡一块
+19. PCD_SI523_TypeA_Init - 读A卡初始化配置
+
+
+20. PCD_SI523_TypeA_GetUID - 读取A卡UID
+21. PCD_SI523_TypeA_rw_block - 读A卡扇区
+22. PCD_SI523_TypeB_Init - 读B卡初始化配置
+23. PCD_SI523_TypeB - 循环读取B卡UID
+24. PCD_SI523_TypeB_GetUID - 读取Type B卡UID
+25. PCD_SI523_IdentityCard_GetUID - 读取二代身份证UID
+26. PcdReset - 复位RC522
+27. I_SI523_ClearBitMask - 清除寄存器的特定位
+28. I
+
+继续补充剩余的函数列表，包括设备接口和辅助功能。这些函数主要涵盖SI523设备的各种操作，包括复位、位操作、ACD模式和卡片管理等关键功能。
+
+29. I_SI523_SetBitMask - 允许精确控制设备寄存器状态
+30. I_SI523_SiModifyReg - 提供灵活的寄存器修改能力
+31. ACD_init_Fun - 支持自动卡检测初始化
+32. ACD_Fun - 启用卡检测中断处理
+33. PCD_ACD_AutoCalc - 智能计算自动检测阈值
+34. PCD_ACD_Init - 配置自动卡检测模式
+35. PCD_IRQ - 管理和清除设备中断
+36. SI523_CheckVer - 检查设备固件版本
+37. CR_CheckInt - 执行带重试的卡检测
+38. CR_GetCardID - 检索卡识别结果
+
+我将为每个函数编写简洁的API文档说明，突出其核心功能和使用场景。
+# SI523 API 文档
+
+## 基础I2C操作
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `SI523_IIC_Init` | 初始化SI523设备的I2C接口，添加设备到I2C总线 |
+| `I_SI523_IO_Write` | 向SI523指定寄存器写入一个字节数据 |
+| `I_SI523_IO_Read` | 从SI523指定寄存器读取一个字节数据 |
+| `SI523_Init` | 使用默认配置初始化SI523设备 |
+
+## 天线控制
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `PcdAntennaOn` | 开启SI523的天线发射功能 |
+| `PcdAntennaOff` | 关闭SI523的天线发射功能 |
+
+## 卡片通讯
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `PcdComMF522` | 通过SI522与ISO14443卡进行通讯的核心函数 |
+| `CalulateCRC` | 计算ISO14443协议所需的CRC16校验码 |
+
+## 卡片操作 - TypeA卡
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `PCD_SI523_TypeA_Init` | 配置SI523为TypeA卡（Mifare）通讯模式 |
+| `PcdRequest` | 向天线区域内寻卡，返回卡片类型ATQA |
+| `PcdAnticoll` | 执行防冲撞操作，获取卡片UID |
+| `PcdSelect` | 选中指定UID的卡片，返回SAK值 |
+| `PcdSelect1` | Level 1选卡，用于4字节UID的卡片 |
+| `PcdSelect2` | Level 2选卡，用于7字节UID的卡片 |
+| `PcdSelect3` | Level 3选卡，用于10字节UID的卡片 |
+| `PcdHalt` | 命令卡片进入休眠状态 |
+| `PCD_SI523_TypeA_GetUID` | 完整读取TypeA卡的UID（支持4/7/10字节UID） |
+| `PCD_SI523_TypeA_rw_block` | 读写TypeA卡的指定数据块 |
+
+## 卡片操作 - TypeB卡
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `PCD_SI523_TypeB_Init` | 配置SI523为TypeB卡通讯模式 |
+| `PCD_SI523_TypeB` | 循环读取TypeB卡UID的任务函数 |
+| `PCD_SI523_TypeB_GetUID` | 读取TypeB卡的UID |
+
+## 身份证操作
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `PCD_SI523_IdentityCard_GetUID` | 读取二代身份证的UID |
+
+## 数据读写
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `PcdAuthState` | 验证卡片的访问密钥（A密钥或B密钥） |
+| `PcdRead` | 从Mifare卡读取16字节的数据块 |
+| `PcdWrite` | 向Mifare卡写入16字节的数据块 |
+
+## 寄存器操作
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `I_SI523_ClearBitMask` | 清除指定寄存器的特定位 |
+| `I_SI523_SetBitMask` | 设置指定寄存器的特定位 |
+| `I_SI523_SiModifyReg` | 修改寄存器的特定位（支持置位或清零） |
+
+## 复位操作
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `PcdReset` | 软件复位SI522设备 |
+
+## ACD自动检测模式
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `ACD_init_Fun` | 初始化ACD自动卡检测模式 |
+| `ACD_Fun` | ACD中断模式的卡片检测处理（已注释） |
+| `PCD_ACD_AutoCalc` | 自动计算ACD模式的检测阈值 |
+| `PCD_ACD_Init` | 配置ACD自动检测相关寄存器 |
+| `PCD_IRQ` | 读取并清除SI523的中断状态 |
+
+## 卡片检测接口
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `CR_CheckInt` | 检查卡片状态，带重试机制 |
+| `CR_GetCardID` | 获取最后检测到的卡片ID |
+| `SI523_TypeA_GetUID` | 带重试机制的TypeA卡UID获取 |
+| `GetLastCardID` | 获取最后一张读取的卡片ID |
+
+## 辅助功能
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `SI523_CheckVer` | 读取并打印SI523芯片的版本号 |
+| `PCD_SI523_TypeA` | 循环读取TypeA卡UID的任务函数 |
+
+---
+
+**说明**：所有函数均基于SI522/RC522读卡芯片，支持ISO14443A/B协议（TypeA/TypeB卡）以及二代身份证读取。s

@@ -21,3 +21,4 @@ dependencies:
     git: https://github.com/BunnySakura/lvgl_esp32_drivers.git
     version: fork/hiruna_lvgl_8.3.7_idf_5.2
   k0i05/esp_mmc56x3: ^1.2.7
+ ## abobija/rc522: ^3.4.3

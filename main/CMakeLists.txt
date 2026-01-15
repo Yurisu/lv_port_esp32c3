@@ -1,4 +1,4 @@
-idf_component_register(SRCS main.c img.c)
+idf_component_register(SRCS main.c img.c SI523_App.c )
 
 #设置 LittleFS 文件夹路径
 # set(LITTLEFS_DIR "${CMAKE_CURRENT_LIST_DIR}/../littlefs")
