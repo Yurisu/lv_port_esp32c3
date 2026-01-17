@@ -38,14 +38,15 @@
 #define I2C0_MASTER_SDA_IO             GPIO_NUM_9
 #define I2C0_MASTER_SCL_IO             GPIO_NUM_8 
 #define NPD_EN_GPIO                    GPIO_NUM_10
+#define LED_BG_GPIO                    GPIO_NUM_6
+
 
 #define GPIO_INTERRUPT_PIN             GPIO_NUM_21
 #define GPIO_INTERRUPT_TAG             "GPIO_ISR"
 
 void NPD_EN(int state);
+void BG_EN(int state);
 
-#define LED_4 6
-#define LED_5 6
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
 volatile bool g_task_run = false;
@@ -91,27 +92,27 @@ _Noreturn void PrintChipInfo(void *params) {
   }
 }
 
-_Noreturn void BlinkLed(void *params) {
-  (void) params;
-  uint8_t level = LOW_LEVEL;
-  gpio_reset_pin(LED_4);
-  gpio_set_direction(LED_4, GPIO_MODE_OUTPUT); // Set the GPIO as a push/pull output
-  gpio_reset_pin(LED_5);
-  gpio_set_direction(LED_5, GPIO_MODE_OUTPUT); // Set the GPIO as a push/pull output
-  ESP_LOGI("BlinkLed", "LED configuration completed.");
+// _Noreturn void BlinkLed(void *params) {
+//   (void) params;
+//   uint8_t level = LOW_LEVEL;
+//   gpio_reset_pin(LED_4);
+//   gpio_set_direction(LED_4, GPIO_MODE_OUTPUT); // Set the GPIO as a push/pull output
+//   gpio_reset_pin(LED_5);
+//   gpio_set_direction(LED_5, GPIO_MODE_OUTPUT); // Set the GPIO as a push/pull output
+//   ESP_LOGI("BlinkLed", "LED configuration completed.");
 
-  while (true) {
-    gpio_set_level(LED_4, level);
-    ESP_LOGI("BlinkLed", "LED_4: %s!", level == HIGH_LEVEL ? "ON" : "OFF");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+//   while (true) {
+//     gpio_set_level(LED_4, level);
+//     ESP_LOGI("BlinkLed", "LED_4: %s!", level == HIGH_LEVEL ? "ON" : "OFF");
+//     vTaskDelay(1000 / portTICK_PERIOD_MS);
 
-    level = !level;
+//     level = !level;
 
-    gpio_set_level(LED_5, level);
-    ESP_LOGI("BlinkLed", "LED_5: %s!", level == HIGH_LEVEL ? "ON" : "OFF");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
-}
+//     gpio_set_level(LED_5, level);
+//     ESP_LOGI("BlinkLed", "LED_5: %s!", level == HIGH_LEVEL ? "ON" : "OFF");
+//     vTaskDelay(1000 / portTICK_PERIOD_MS);
+//   }
+// }
 
 
 
@@ -294,14 +295,21 @@ void NPD_EN(int state)
 {
     gpio_set_level(NPD_EN_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
 }
-
+void BG_EN(int state)
+{
+    gpio_set_level(LED_BG_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
+}
 // Initialize NPD_EN GPIO10 as output with low level
 static void npd_gpio_init(void)
 {
     gpio_reset_pin(NPD_EN_GPIO);
     gpio_set_direction(NPD_EN_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(NPD_EN_GPIO, LOW_LEVEL);
-    ESP_LOGI("NPD_EN", "GPIO %d configured as output, default level: LOW", NPD_EN_GPIO);
+    
+    gpio_reset_pin(LED_BG_GPIO);
+    gpio_set_direction(LED_BG_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(LED_BG_GPIO, LOW_LEVEL);
+    
 }
 
 // Initialize GPIO interrupt
@@ -404,9 +412,9 @@ _Noreturn void app_main(void) {
       ESP_LOGI("app_main", "Task PrintChipInfo delete.");
     }
   }
-  while (1) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
-  }
+  // while (1) {
+  //   vTaskDelay(pdMS_TO_TICKS(1000));
+  // }
 
 
 
@@ -421,6 +429,7 @@ _Noreturn void app_main(void) {
   /**
    * \brief Start LVGL demo.
    */
+  BG_EN(1);
   lv_init();
   lvgl_driver_init();
   lv_port_fs_init();
