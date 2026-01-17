@@ -10,14 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/gpio.h"
 #include "sdkconfig.h"
+#include "driver/gpio.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_timer.h"
 #include "esp_freertos_hooks.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "nvs_flash.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -25,8 +27,125 @@
 #include "lvgl_helpers.h"
 #include "lv_port_fs.h"
 
+//bluetooth
+#include "esp_bt.h"
+#include "esp_bt_defs.h"
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_gatt_defs.h"
+#include "esp_bt_main.h"
+#include "esp_mac.h" // 标准MAC API
+#include "esp_bt_device.h"
+
+//hid
+#include "hidd_le_prf_int.h"
+#include "esp_hidd_prf_api.h"
+#include "hid_dev.h"
+#include "esp_task_wdt.h"
+#include "esp_hidd_api.h"
+// HID报告配置
+#define BATTERY_REPORT_ID 0x02
+#define BATTERY_REPORT_SIZE 1
+#define HIDD_DEVICE_NAME      "VSchess-"
+char blerename[32];
+uint8_t macAddr[6]; //蓝牙地址
+
+static uint16_t hid_conn_id = 0;
+static bool sec_conn = false;
+static bool send_volum_up = false;
+#define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
+
+// #define HIDD_DEVICE_NAME            "HID"
+static uint8_t hidd_service_uuid128[] = {
+    /* LSB <--------------------------------------------------------------------------------> MSB */
+    // first uuid, 16bit, [12],[13] is the value
+    0xfb,
+    0x34,
+    0x9b,
+    0x5f,
+    0x80,
+    0x00,
+    0x00,
+    0x80,
+    0x00,
+    0x10,
+    0x00,
+    0x00,
+    0x12,
+    0x18,
+    0x00,
+    0x00,
+};
+
+static esp_ble_adv_data_t hidd_adv_data = {
+    .set_scan_rsp = false,
+    .include_name = true,
+    .include_txpower = true,
+    .min_interval = 0x0140, // slave connection min interval, Time = min_interval * 1.25 msec
+    .max_interval = 0x0320, // slave connection max interval, Time = max_interval * 1.25 msec
+    .appearance = 0x03c1,   // 0x41, 鼠标    // 0x03c0,   HID Generic,
+    .manufacturer_len = 0,
+    .p_manufacturer_data = NULL,
+    .service_data_len = 0,
+    .p_service_data = NULL,
+    .service_uuid_len = 0,//sizeof(hidd_service_uuid128),
+    .p_service_uuid = NULL,//hidd_service_uuid128,
+    .flag = 0x6,
+};
+
+static esp_ble_adv_params_t hidd_adv_params = {
+    .adv_int_min = 0x140, //0.625,140=200ms
+    .adv_int_max = 0x320, //640=1s,320=0.5s
+    .adv_type = ADV_TYPE_IND,
+    .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+    //.peer_addr            =
+    //.peer_addr_type       =
+    .channel_map = ADV_CHNL_ALL,
+    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+};
+
+//nfc
 #include "mmc56x3.h"
 #include "SI523_App.h"
+
+//ws2812
+#include "driver/rmt_tx.h"
+#include "led_strip_encoder.h"
+#define RMT_LED_STRIP_RESOLUTION_HZ 10000000 // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
+#define RMT_LED_STRIP_GPIO_NUM      6
+#define LEDS_COUNT                  1
+uint8_t led_strip_pixels[LEDS_COUNT] = {0};
+uint8_t led_brightness= 100;
+
+
+//adc
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+struct capacity {
+  int capacity;
+  int minx;
+  int maxx;
+};
+#define battery_capacity_tables_size 12
+static struct capacity battery_capacity_tables[] = {
+  /*  capacity, minx, maxx  */
+  {0, 3306, 3426},//0red
+  {1, 3427, 3638},//0
+  {10, 3639, 3697}, //0
+  {20, 3698, 3729}, //1
+  {30, 3730, 3748}, //1
+  {40, 3749, 3776}, //2
+  {50, 3777, 3827}, //2
+  {60, 3828, 3895}, //2
+  {70, 3896, 3954}, //3
+  {80, 3955, 4050}, //3
+  {90, 4051, 4119}, //3
+  {100, 4120, 4240}, //3
+};
+
+const char* hidden_msg = "专业软硬件开发,方案可出何必破解,价格合理,合作愉快,期待共赢, yuri_su@163.com , +8613580387577  ";
+const char* hidden_msg2 = "Professional hardware and software solutions available for purchase.[yuri_su@163.com,+8613580387577] No need to break in — let's save the effort and share the rewards. Reasonable prices, pleasant cooperation, and mutual success await.";
 
 
 // 包含 LVGL demos（如果启用了的话）
@@ -336,6 +455,100 @@ void gpio_interrupt_init(void)
 
 
 
+static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param)
+{
+    switch (event)
+    {
+    case ESP_HIDD_EVENT_REG_FINISH:
+    {
+        if (param->init_finish.state == ESP_HIDD_INIT_OK)
+        {
+            // esp_bd_addr_t rand_addr = {0x04,0x11,0x11,0x11,0x11,0x05};
+            esp_ble_gap_set_device_name(blerename);
+            esp_ble_gap_config_adv_data(&hidd_adv_data);
+        }
+        break;
+    }
+    case ESP_BAT_EVENT_REG:
+    {
+        ESP_LOGI("HIDevent", "ESP_BAT_EVENT_REG");
+        break;
+    }
+    case ESP_HIDD_EVENT_DEINIT_FINISH:
+        break;
+    case ESP_HIDD_EVENT_BLE_CONNECT:
+    {
+        ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_BLE_CONNECT");
+        hid_conn_id = param->connect.conn_id;
+
+
+        esp_ble_conn_update_params_t conn_params = {0};
+        memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+        conn_params.latency = 0;
+        conn_params.max_int = 0x320;    // max_int = 0x20*1.25ms = 40ms
+        conn_params.min_int = 0x70;    // min_int = 0x10*1.25ms = 20ms
+        conn_params.timeout = 1000;    // timeout = 400*10ms = 4000ms
+        esp_ble_gap_update_conn_params(&conn_params);
+
+        break;
+    }
+    case ESP_HIDD_EVENT_BLE_DISCONNECT:
+    {
+        sec_conn = false;
+        ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_BLE_DISCONNECT");
+        esp_ble_gap_start_advertising(&hidd_adv_params);
+        break;
+    }
+    case ESP_HIDD_EVENT_BLE_VENDOR_REPORT_WRITE_EVT:
+    {
+        ESP_LOGI("HIDevent", "%s, ESP_HIDD_EVENT_BLE_VENDOR_REPORT_WRITE_EVT", __func__);
+        ESP_LOG_BUFFER_HEX("HIDevent", param->vendor_write.data, param->vendor_write.length);
+        break;
+    }
+    case ESP_HIDD_EVENT_BLE_LED_REPORT_WRITE_EVT:
+    {
+        ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_BLE_LED_REPORT_WRITE_EVT");
+        ESP_LOG_BUFFER_HEX("HIDevent", param->led_write.data, param->led_write.length);
+        break;
+    }
+    default:
+        break;
+    }
+    return;
+}
+
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+{
+    switch (event)
+    {
+    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+        esp_ble_gap_start_advertising(&hidd_adv_params);
+        break;
+    case ESP_GAP_BLE_SEC_REQ_EVT:
+        for (int i = 0; i < ESP_BD_ADDR_LEN; i++)
+        {
+            ESP_LOGD("GAPevent", "%x:", param->ble_security.ble_req.bd_addr[i]);
+        }
+        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+        break;
+    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+        sec_conn = true;
+        esp_bd_addr_t bd_addr;
+        memcpy(bd_addr, param->ble_security.auth_cmpl.bd_addr, sizeof(esp_bd_addr_t));
+        ESP_LOGI("GAPevent", "remote BD_ADDR: %08x%04x",
+                 (bd_addr[0] << 24) + (bd_addr[1] << 16) + (bd_addr[2] << 8) + bd_addr[3],
+                 (bd_addr[4] << 8) + bd_addr[5]);
+        ESP_LOGI("GAPevent", "address type = %d", param->ble_security.auth_cmpl.addr_type);
+        ESP_LOGI("GAPevent", "pair status = %s", param->ble_security.auth_cmpl.success ? "success" : "fail");
+        if (!param->ble_security.auth_cmpl.success)
+        {
+            ESP_LOGE("GAPevent", "fail reason = 0x%x", param->ble_security.auth_cmpl.fail_reason);
+        }
+        break;
+    default:
+        break;
+    }
+}
 
 
 
@@ -415,6 +628,144 @@ _Noreturn void app_main(void) {
   // while (1) {
   //   vTaskDelay(pdMS_TO_TICKS(1000));
   // }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    esp_err_t ret;
+
+// Initialize NVS.
+        ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+        {
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            ret = nvs_flash_init();
+        }
+        ESP_ERROR_CHECK(ret);
+
+        nvs_handle_t handle;
+        int32_t  startcounter;
+        ret = nvs_open("VS", NVS_READWRITE, &handle);
+
+        if (ret == ESP_OK)
+        {
+            // 读取
+            // int32_t val = 0;
+            nvs_get_i32(handle, "start", &startcounter);
+            ESP_LOGI("nvs", "start: %d ", (int)startcounter);
+            startcounter++;
+            // 写入
+            nvs_set_i32(handle, "start", startcounter);
+            nvs_commit(handle);
+
+            // uint8_t bdAddr[6];
+            // const uint8_t *add= esp_bt_dev_get_address();
+            // memcpy(bdAddr,add,sizeof(esp_bd_addr_t));
+            // ESP_LOGI(TAG, "Bluetooth Address is  %X:%X:%X:%X:%X:%X ",bdAddr[0],bdAddr[1],bdAddr[2],bdAddr[3],bdAddr[4],bdAddr[5]);
+
+            uint8_t fmac[6] = {72, 49, 183, 93, 232, 58};
+            // 定义macAddr为uint8_t类型的数组，这个数组含有6个元素。
+            esp_read_mac(&macAddr, ESP_MAC_BT); // MAC地址会储存在这个macAddr数组里面
+
+            ESP_LOGI("nvs", "Bluetooth Address is %02X:%02X:%02X:%02X:%02X:%02X ", macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+            // int8_t temp_value[6] = 0;
+            size_t len = 6;
+            if (nvs_get_blob(handle, "fces", &fmac, &len) != ESP_OK) //== ESP_ERR_NVS_NOT_FOUND)
+            {
+                nvs_set_blob(handle, "fces", macAddr, len);
+                nvs_commit(handle);
+            }
+            else
+            {
+                // fmac[0] = 0;
+                ESP_LOGI("nvs", "%03d%03d%03d%09d%03d%03d%03d\n", macAddr[0], macAddr[1], macAddr[2], memcmp(macAddr, fmac, 6), macAddr[3], macAddr[4], macAddr[5]);
+                // 072-049-183--00000032-093-232-058
+                // 判断内置MAC与芯片MAC是否有差异
+                // 打印的信息是mac地址的10进制，每位16进制转换位3位数，前9位和后9位，中间9位长度不定，是设定值与实际的差。
+                //uint32_t diff = 100; // 100s
+                if (memcmp(macAddr, fmac, 6))
+                {
+                    // MAC地址有差异，执行相应的处理
+                    ESP_LOGI("nvs", "MAC detected");
+                }
+            }
+        }
+
+
+//BLE
+  if(1)
+  {
+      sprintf(blerename, "%s%02X%02X%02X", HIDD_DEVICE_NAME, macAddr[3], macAddr[4], macAddr[5]);
+      ESP_LOGI("BLEinit", "Device name: %s", blerename);
+
+      ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+      esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+      ret = esp_bt_controller_init(&bt_cfg);
+      if (ret)
+      {
+          ESP_LOGE("BLEinit", "%s initialize controller failed", __func__);
+          return;
+      }
+
+      ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+      if (ret)
+      {
+          ESP_LOGE("BLEinit", "%s enable controller failed", __func__);
+          return;
+      }
+
+      ret = esp_bluedroid_init();
+      if (ret)
+      {
+          ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
+          return;
+      }
+
+      ret = esp_bluedroid_enable();
+      if (ret)
+      {
+          ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
+          return;
+      }
+
+      if ((ret = esp_hidd_profile_init()) != ESP_OK)
+      {
+          ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
+      }
+
+      /// register the callback function to the gap module
+      esp_ble_gap_register_callback(gap_event_handler);
+      esp_hidd_register_callbacks(hidd_event_callback); // set name
+
+      /* set the security iocap & auth_req & key size & init key response key parameters to the stack*/
+      esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND; // bonding with peer device after authentication
+      esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;       // set the IO capability to No output No input
+      uint8_t key_size = 16;                          // the key size should be 7~16 bytes
+      uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+      uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+      esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
+      esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
+      esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
+      /* If your BLE device act as a Slave, the init_key means you hope which types of key of the master should distribute to you,
+      and the response key means which key you can distribute to the Master;
+      If your BLE device act as a master, the response key means you hope which types of key of the slave should distribute to you,
+      and the init key means which key you can distribute to the slave. */
+      esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
+      esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
+
+      // xTaskCreate(&hid_demo_task, "hid_task", 2048, NULL, 5, NULL);
+    }
 
 
 
