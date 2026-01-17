@@ -176,8 +176,7 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
     mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
     if (dev_hdl == NULL) {
         ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
-        vTaskDelete(NULL);
-        return;
+        assert(dev_hdl);
     }
     //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
 
@@ -208,10 +207,10 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
         //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
         
         // 磁力测量复位校准
-        ESP_LOGI(MMC_TAG, "Performing MMC56X3 calibration...");
-        mmc56x3_magnetic_set_reset(dev_hdl);
-        vTaskDelay(1000 / portTICK_PERIOD_MS); // 等待校准完成
-        ESP_LOGI(MMC_TAG, "MMC56X3 calibration completed");
+        // ESP_LOGI(MMC_TAG, "Performing MMC56X3 calibration...");
+        // mmc56x3_magnetic_set_reset(dev_hdl);
+        // vTaskDelay(1000 / portTICK_PERIOD_MS); // 等待校准完成
+        // ESP_LOGI(MMC_TAG, "MMC56X3 calibration completed");
         // handle sensor
         mmc56x3_magnetic_axes_data_t magnetic_axes;
         esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
