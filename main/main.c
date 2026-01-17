@@ -42,6 +42,7 @@
 #define LED_5 6
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
+static bool g_task_run = false;
 
 void lv_tick_task(void *arg) {
   (void) arg;
@@ -170,6 +171,24 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
     unsigned char data[16];
     
     SI523_Init(i2c0_bus_hdl);
+
+        // init device
+    mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
+    if (dev_hdl == NULL) {
+        ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
+
+
+  while (1)
+  {
+    g_task_run = false;
+    while (!g_task_run) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
     if(SI523_CheckVer() != 0){
       PCD_SI523_TypeA_Init();
       //PCD_SI523_TypeA();
@@ -183,31 +202,16 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
     }}
 
 
-
-
-
-
-
-    // init device
-    mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
-    if (dev_hdl == NULL) {
-        ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
-        vTaskDelete(NULL);
-        return;
-    }
-    //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
-
-    // 磁力测量复位校准
-    ESP_LOGI(MMC_TAG, "Performing MMC56X3 calibration...");
-    mmc56x3_magnetic_set_reset(dev_hdl);
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // 等待校准完成
-    ESP_LOGI(MMC_TAG, "MMC56X3 calibration completed");
-
     status = 10;
     // task loop entry point - 只执行一次测量
     for(int i = 0; i < status; i++) {
         //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
-        //
+        
+        // 磁力测量复位校准
+        ESP_LOGI(MMC_TAG, "Performing MMC56X3 calibration...");
+        mmc56x3_magnetic_set_reset(dev_hdl);
+        vTaskDelay(1000 / portTICK_PERIOD_MS); // 等待校准完成
+        ESP_LOGI(MMC_TAG, "MMC56X3 calibration completed");
         // handle sensor
         mmc56x3_magnetic_axes_data_t magnetic_axes;
         esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
@@ -224,11 +228,10 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
         }
         //
         //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
-        //
-        //
         // pause between attempts
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
+  }
     //
     // free resources
     mmc56x3_delete( dev_hdl );
@@ -252,14 +255,14 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
     // Send notification to task (optional, for debouncing or complex handling)
     // For simple logging, we can directly log here
     ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
-    
+    g_task_run = true;
     // 检查任务是否已存在，避免重复创建
-    TaskHandle_t task_handle = xTaskGetHandle(MMC_TASK_NAME);
-    if (task_handle == NULL) {
-        xTaskCreatePinnedToCore(i2c0_mmc56x3_task, MMC_TASK_NAME, MMC_TASK_STACK_SIZE, NULL, MMC_TASK_PRIORITY, NULL, 0);
-    } else {
-        ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "Task %s already exists, skipping creation", MMC_TASK_NAME);
-    }
+    // TaskHandle_t task_handle = xTaskGetHandle(MMC_TASK_NAME);
+    // if (task_handle == NULL) {
+    //     xTaskCreatePinnedToCore(i2c0_mmc56x3_task, MMC_TASK_NAME, MMC_TASK_STACK_SIZE, NULL, MMC_TASK_PRIORITY, NULL, 0);
+    // } else {
+    //     ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "Task %s already exists, skipping creation", MMC_TASK_NAME);
+    // }
     
     // Clear the interrupt status
     gpio_intr_disable(gpio_num);
@@ -353,8 +356,8 @@ _Noreturn void app_main(void) {
   IIC_init();
   gpio_interrupt_init();
 
-  // 移除自动创建任务，改为按键触发
-  // xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+  // 自动创建任务，按键触发
+  xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
   //xTaskCreate(BlinkLed, "BlinkLed", 1024 * 4, NULL, 1, NULL);
