@@ -1,0 +1,95 @@
+用户想要我整理mmc56x3.c文件的API文档，要求每个函数用一句话简介介绍即可。让我分析这个文件中的函数：
+
+这个文件是MMC56X3磁传感器的驱动程序，包含了I2C读写、传感器初始化、数据读取等功能。
+
+让我按功能分类整理：
+
+1. I2C通信相关函数
+2. 寄存器读写相关函数
+3. 设备初始化和管理函数
+4. 数据获取函数（温度、磁力数据）
+5. 状态查询函数
+6. 配置设置函数（模式、数据率、带宽等）
+7. 自检功能
+8. 复位和删除函数
+9. 工具函数（角度转换）
+
+让我整理一下：
+# MMC56X3 磁传感器 API 文档
+
+## I2C通信
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_i2c_read_from` | 从指定寄存器地址读取多字节数据 |
+| `mmc56x3_i2c_read_byte_from` | 从指定寄存器地址读取单个字节 |
+| `mmc56x3_i2c_write_byte_to` | 向指定寄存器地址写入单个字节 |
+
+## 寄存器访问
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_get_status_register` | 读取设备状态寄存器1 |
+| `mmc56x3_set_control0_register` | 设置控制寄存器0的配置参数 |
+| `mmc56x3_set_control1_register` | 设置控制寄存器1的配置参数 |
+| `mmc56x3_set_control2_register` | 设置控制寄存器2的配置参数 |
+| `mmc56x3_get_product_id_register` | 读取产品标识符寄存器 |
+
+## 设备管理
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_init` | 初始化MMC56X3传感器并添加到I2C总线 |
+| `mmc56x3_remove` | 从I2C主总线移除设备 |
+| `mmc56x3_delete` | 删除设备句柄并释放资源 |
+
+## 数据获取
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_get_temperature` | 获取传感器测量的温度值 |
+| `mmc56x3_get_magnetic_axes` | 获取三轴磁感应强度数据（X/Y/Z轴） |
+| `mmc56x3_get_magnetic_data_status` | 查询磁力数据是否就绪 |
+| `mmc56x3_get_temperature_data_status` | 查询温度数据是否就绪 |
+| `mmc56x3_get_data_status` | 同时查询磁力和温度数据就绪状态 |
+
+## 测量模式配置
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_set_measure_mode` | 设置连续测量模式或单次测量模式 |
+| `mmc56x3_set_data_rate` | 设置数据采样率（ODR） |
+| `mmc56x3_set_measure_bandwidth` | 设置测量带宽 |
+
+## 周期性测量配置
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_enable_periodical_set` | 启用周期性自校准设置 |
+| `mmc56x3_disable_periodical_set` | 禁用周期性自校准设置 |
+
+## 自检功能
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_set_selftest_thresholds` | 设置各轴自检阈值 |
+| `mmc56x3_get_selftest_set_values` | 获取各轴自检设定值 |
+| `mmc56x3_set_selftest_set_values` | 设置各轴自检设定值 |
+| `mmc56x3_magnetic_set_reset` | 执行磁力测量复位操作 |
+
+## 复位操作
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_reset` | 执行设备软复位并恢复默认配置 |
+
+## 工具函数
+
+| 函数名 | 功能说明 |
+|--------|----------|
+| `mmc56x3_convert_to_heading` | 将磁力数据转换为方位角（0-360度） |
+| `mmc56x3_convert_to_true_heading` | 将磁力数据转换为真实方位角（含磁偏角补偿） |
+
+---
+
+**说明**：所有数据值单位为毫高斯（mG），温度值已转换为摄氏度（°C），分辨率0.0625mG/LSB。

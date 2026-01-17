@@ -132,7 +132,7 @@ void I_SI523_IO_Write(unsigned char RegAddr, unsigned char value)
 }
 
     /* delay after write */
-    vTaskDelay(pdMS_TO_TICKS(SI523_WRITE_DELAY_MS));
+    //vTaskDelay(pdMS_TO_TICKS(SI523_WRITE_DELAY_MS));
     
 }
 /**
@@ -164,7 +164,7 @@ unsigned char I_SI523_IO_Read(unsigned char RegAddr)
     }
     
     /* delay after read */
-    vTaskDelay(pdMS_TO_TICKS(SI523_TX_RX_DELAY_MS));
+    //vTaskDelay(pdMS_TO_TICKS(SI523_TX_RX_DELAY_MS));
 	//ESP_LOGI(TAG, "I2C read success: reg=0x%02X, val=0x%02X", RegAddr, rx_data[0]);
     return rx_data[0];
 }
@@ -223,26 +223,43 @@ void PcdAntennaOff(void)
 /////////////////////////////////////////////////////////////////////
 //用MF522计算CRC16函数
 /////////////////////////////////////////////////////////////////////
-void CalulateCRC(unsigned char *pIndata,unsigned char len,unsigned char *pOutData)
+char CalulateCRC(unsigned char *pIndata, unsigned char len, unsigned char *pOutData)
 {
-    unsigned char i,n;
-    I_SI523_ClearBitMask(DivIrqReg,0x04);
-    I_SI523_IO_Write(CommandReg,PCD_IDLE);
-    I_SI523_SetBitMask(FIFOLevelReg,0x80);
-    for (i=0; i<len; i++)
-    {   I_SI523_IO_Write(FIFODataReg, *(pIndata+i));   }
-    I_SI523_IO_Write(CommandReg, PCD_CALCCRC);
-    i = 0xFF;
-    do 
-    {
-        n = I_SI523_IO_Read(DivIrqReg);
-        i--;
-    }
-    while ((i!=0) && !(n&0x04));
-    pOutData[0] = I_SI523_IO_Read(CRCResultRegL);
-    pOutData[1] = I_SI523_IO_Read(CRCResultRegH);
-}
+	unsigned int i;
+	unsigned char n;
 
+	// 停止当前命令，清除中断
+	I_SI523_IO_Write(CommandReg, PCD_IDLE);
+	I_SI523_ClearBitMask(DivIrqReg, 0x04);
+	I_SI523_SetBitMask(FIFOLevelReg, 0x80);
+
+	// 写入数据到FIFO
+	for (i = 0; i < len; i++)
+	{
+		I_SI523_IO_Write(FIFODataReg, *(pIndata + i));
+	}
+
+	// 开始CRC计算
+	I_SI523_IO_Write(CommandReg, PCD_CALCCRC);
+
+	// 带超时的等待循环（约50ms超时）
+	for (i = 5000; i > 0; i--)
+	{
+		n = I_SI523_IO_Read(DivIrqReg);
+		if (n & 0x04)
+		{											// CRCIRq位设置，计算完成
+			I_SI523_IO_Write(CommandReg, PCD_IDLE); // 停止计算
+			pOutData[0] = I_SI523_IO_Read(CRCResultRegL);
+			pOutData[1] = I_SI523_IO_Read(CRCResultRegH);
+			ESP_LOGI(TAG, "CRC calculation success: CRCResultRegL=0x%02X, CRCResultRegH=0x%02X", pOutData[0], pOutData[1]);
+			return MI_OK;
+		}
+	}
+
+	// 超时处理
+	ESP_LOGE(TAG, "CRC calculation timeout");
+	return MI_ERR;
+}
 
 unsigned char aaa = 0;
 
@@ -828,6 +845,7 @@ char PCD_SI523_TypeA_GetUID(void)
 	}
 	else
 	{
+		//选定卡片
 		if(PcdSelect1(UID,&SAK)!= MI_OK)
 		{
 			ESP_LOGI(TAG, "Select1 failed");
@@ -884,7 +902,7 @@ char PCD_SI523_TypeA_GetUID(void)
 											ESP_LOGI(TAG, "Select3 ok: SAK=%02X", SAK);
 											if(SAK&0x04)                          
 											{
-//												UID_complate3 = 0;
+												//UID_complate3 = 0;
 											}
 											else 
 											{
@@ -985,7 +1003,9 @@ char PCD_SI523_TypeA_rw_block(void)
 	}
 
 	//Authenticate 验证密码
-	if(PcdAuthState( PICC_AUTHENT1A, 4, DefaultKeyABuf, UID ) != MI_OK )
+	unsigned char ackbuf[2] = {0};
+	if(PcdAuthState( PICC_AUTHENT1B, 4, DefaultKeyABuf, UID ) != MI_OK )
+	//if(PcdNTAG216_Auth(DefaultKeyABuf,ackbuf  ) != MI_OK )
 	{
 		// printf("\r\nAuthenticate:fail");
 		ESP_LOGI(TAG, "Authenticate:fail");
@@ -1015,28 +1035,29 @@ char PCD_SI523_TypeA_rw_block(void)
 	}
 
 	//产生随机数
-	for(unsigned char i=0;i<16;i++)
-		CardWriteBuf[i] = rand();
+	// for(unsigned char i=0;i<16;i++)
+	// 	CardWriteBuf[i] = rand();
 
-	//写BLOCK 写入新的数据
-	if( PcdWrite( 4, CardWriteBuf ) != MI_OK )
-	{
-		// printf("\r\nPcdWrite:fail");
-		ESP_LOGI(TAG, "PcdWrite:fail");
-		return 1;
-	}
-	else
-	{
-		// printf("\r\nPcdWrite:ok  ");
-		ESP_LOGI(TAG, "PcdWrite:ok");
-		for(unsigned char i=0;i<16;i++)
-		{
-			// printf(" %02x",CardWriteBuf[i]);
-		}
-	}
+	// //写BLOCK 写入新的数据
+	// if( PcdWrite( 4, CardWriteBuf ) != MI_OK )
+	// {
+	// 	// printf("\r\nPcdWrite:fail");
+	// 	ESP_LOGI(TAG, "PcdWrite:fail");
+	// 	return 1;
+	// }
+	// else
+	// {
+	// 	// printf("\r\nPcdWrite:ok  ");
+	// 	ESP_LOGI(TAG, "PcdWrite:ok");
+	// 	for(unsigned char i=0;i<16;i++)
+	// 	{
+	// 		// printf(" %02x",CardWriteBuf[i]);
+	// 	}
+	// }
 		
-	//读BLOCK 读出新写入的数据
-	if( PcdRead( 4, CardReadBuf ) != MI_OK )
+	//读BLOCK 读出新写入的数据		
+	PICC_DumpMifareUltralightToLog();
+	if( PcdRead( 0, CardReadBuf ) != MI_OK )
 	{
 		// printf("\r\nPcdRead:fail");
 		ESP_LOGI(TAG, "PcdRead:fail");
@@ -1051,6 +1072,7 @@ char PCD_SI523_TypeA_rw_block(void)
 			// printf(" %02x",CardReadBuf[i]);
 		}
 	}
+
 		
 //	//Halt
 //	if(PcdHalt() != MI_OK)
@@ -1114,14 +1136,54 @@ void PCD_SI523_TypeA(void)
 	{
 	    unsigned char version = I_SI523_IO_Read(VersionReg);
 	    ESP_LOGI(TAG, "IC Version: 0x%02X", version);
-		PCD_SI523_TypeA_GetUID();		//读A卡
-		
-		PCD_SI523_TypeA_rw_block();		//读A卡扇区
+		PCD_SI523_TypeA_GetUID();//读取UID
 
-		vTaskDelay(pdMS_TO_TICKS(5000)); //500ms
+	//产生随机数
+	// for(unsigned char i=0;i<16;i++){
+	// 	CardWriteBuf[i] = (unsigned char)(rand()&0x0A) + 0x30;
+	// }
+
+		PICC_DumpMifareUltralightToLog();
+		vTaskDelay(pdMS_TO_TICKS(10000)); //500ms
 	}
 }
+char SI523_read_NTAG(unsigned char page, unsigned char *buffer)
+{
+	ESP_LOGI(TAG, "Starting NTAG card reading");
+	PCD_SI523_TypeA_GetUID();
+	return PcdRead(page, buffer);
+}
 
+//每次写入一页,4字节,Yuri数据存12页
+char SI523_write_NTAG(unsigned char page, unsigned char *buffer)
+{
+	return PcdWrite(page, buffer);
+}
+char SI523_write_YURIDATA(void)
+{
+	//unsigned char CardWriteBuf[16] = {1,3,0xa7,0xc,0x34,0x3,0xb,0xd1,0x0,0x7,0x54,0x2,0x7a,0x68,0x34,0x33};
+	unsigned char CardWriteBuf1[32] = {\
+		0x01,0x03,0xa7,0x0c,\
+		0x34,0x03,0x14,0xd1,\
+		0x01,0x10,0x55,0x00,\
+		0x79,0x75,0x72,0x69,\
+	//};
+	//unsigned char CardWriteBuf2[16] = {
+		0x5f,0x73,0x75,0x40,\
+		0x31,0x36,0x33,0x2e,\
+		0x63,0x6f,0x6d,0xfe,\
+		0x6d,0xfe,0x00,0x00\
+	};
+	for(unsigned char i=0;i<8;i++){
+		//写BLOCK 写入新的数据,每次4个字节
+		if( PcdWrite( i+4, CardWriteBuf1+(i*4) ) != MI_OK )
+		{
+			ESP_LOGI(TAG, "PcdWrite:fail");
+			return MI_ERR;
+		}
+	}
+	return MI_OK;
+}
 /*================================
  函数功能：循环读取B卡UID
 
@@ -1542,10 +1604,11 @@ char PCD_IRQ(void)
 /////////////////////////////////////////////////////////////////////
 //功    能：读取并打印SI523芯片版本号
 ////////////////////////////////////////////////////////////////////
-void SI523_CheckVer( void )
+unsigned char SI523_CheckVer( void )
 {
     unsigned char version = I_SI523_IO_Read(VersionReg);
     ESP_LOGI(TAG, "IC Version: 0x%02X", version);
+	return version;
 }
 
 static unsigned char Flag_Detected_IC = 0;
@@ -1708,4 +1771,51 @@ void GetLastCardID( unsigned char *id )
 {
     ESP_LOGI(TAG, "LastCard: %02X%02X%02X%02X", SelectedSnr[0], SelectedSnr[1], SelectedSnr[2], SelectedSnr[3] );
     memcpy( id, SelectedSnr, 4 );
+}
+
+/////////////////////////////////////////////////////////////////////
+//功    能：打印Mifare Ultralight卡片内容到日志
+//参数说明: 无
+//返    回: 无
+////////////////////////////////////////////////////////////////////
+void PICC_DumpMifareUltralightToLog(void)
+{
+    char status;
+    unsigned char byteCount;
+    unsigned char buffer[18];
+    char log_line[128];
+    unsigned char i;
+    
+    ESP_LOGI(TAG, "Page  0  1  2  3");
+    // Try the pages of the original Ultralight. Ultralight C has more pages.
+    for(unsigned char page = 0; page < 16; page += 4) { // Read returns data for 4 pages at a time.
+        // Read pages
+        byteCount = sizeof(buffer);
+        status = PcdRead(page, buffer);
+        if(status != MI_OK) {
+            ESP_LOGE(TAG, "PcdRead() failed: status=%d", status);
+            break;
+        }
+        // Dump data
+        for(unsigned char offset = 0; offset < 4; offset++) {
+            i = page+offset;
+            int pos = 0;
+            // Format page number
+            if(i < 10) {
+                pos += snprintf(log_line+pos, sizeof(log_line)-pos, "  %d  ", i);
+            } else {
+                pos += snprintf(log_line+pos, sizeof(log_line)-pos, " %d  ", i);
+            }
+            // Format hex data
+            for(unsigned char index = 0; index < 4; index++) {
+                i = 4*offset+index;
+                if(buffer[i] < 0x10) {
+                    pos += snprintf(log_line+pos, sizeof(log_line)-pos, " 0%02X", buffer[i]);
+                } else {
+                    pos += snprintf(log_line+pos, sizeof(log_line)-pos, " %02X", buffer[i]);
+                }
+            }
+            ESP_LOGI(TAG, "%s", log_line);
+        }
+    }
 }

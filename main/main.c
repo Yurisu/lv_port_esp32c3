@@ -20,6 +20,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "lvgl.h"
 #include "lvgl_helpers.h"
 #include "lv_port_fs.h"
@@ -160,22 +161,52 @@ void IIC_init(void) {
 void i2c0_mmc56x3_task( void *pvParameters ) {
     // initialize the xLastWakeTime variable with the current time.
     TickType_t         last_wake_time  = xTaskGetTickCount ();
-    //
     // initialize i2c device configuration
     mmc56x3_config_t dev_cfg       = I2C_MMC56X3_CONFIG_DEFAULT;
     mmc56x3_handle_t dev_hdl;
     //
+    int status = 10;
+    unsigned char carduid[10];
+    unsigned char data[16];
+    
+    SI523_Init(i2c0_bus_hdl);
+    if(SI523_CheckVer() != 0){
+      PCD_SI523_TypeA_Init();
+      //PCD_SI523_TypeA();
+      if(SI523_TypeA_GetUID(carduid)==1){
+        if(SI523_read_NTAG(12, data) == MI_OK){
+          ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
+        }
+      //SI523_write_YURIDATA(void)== MI_OK
+      //SI523_write_NTAG(unsigned char page, unsigned char *buffer) == MI_OK
+
+    }}
+
+
+
+
+
+
+
     // init device
     mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
     if (dev_hdl == NULL) {
         ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
-        assert(dev_hdl);
+        vTaskDelete(NULL);
+        return;
     }
-    //
-    //
-    // task loop entry point
-    for ( ;; ) {
-        ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
+    //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
+
+    // 磁力测量复位校准
+    ESP_LOGI(MMC_TAG, "Performing MMC56X3 calibration...");
+    mmc56x3_magnetic_set_reset(dev_hdl);
+    vTaskDelay(1000 / portTICK_PERIOD_MS); // 等待校准完成
+    ESP_LOGI(MMC_TAG, "MMC56X3 calibration completed");
+
+    status = 10;
+    // task loop entry point - 只执行一次测量
+    for(int i = 0; i < status; i++) {
+        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
         //
         // handle sensor
         mmc56x3_magnetic_axes_data_t magnetic_axes;
@@ -188,24 +219,74 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
             ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
             ESP_LOGI(MMC_TAG, "Compass Heading: %f °", mmc56x3_convert_to_heading(magnetic_axes));
             ESP_LOGI(MMC_TAG, "True Heading:    %f °", mmc56x3_convert_to_true_heading(dev_hdl->dev_config.declination, magnetic_axes));
+            // 成功读取一次数据后退出循环
+            break;
         }
         //
-        ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
+        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
         //
         //
-        // pause the task per defined wait period
-        //vTaskDelayUntil( &last_wake_time, MMC_TASK_SAMPLING_RATE );
-        vTaskDelay(MMC_TASK_SAMPLING_RATE / portTICK_PERIOD_MS);
+        // pause between attempts
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
     //
     // free resources
     mmc56x3_delete( dev_hdl );
+    ESP_LOGI(MMC_TAG, "Task i2c0_mmc56x3_task completed");
     vTaskDelete( NULL );
 }
 
 
 
 
+
+#define GPIO_INTERRUPT_PIN             GPIO_NUM_21
+#define GPIO_INTERRUPT_TAG             "GPIO_ISR"
+
+// GPIO interrupt handler
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    uint32_t gpio_num = (uint32_t) arg;
+    
+    // Send notification to task (optional, for debouncing or complex handling)
+    // For simple logging, we can directly log here
+    ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
+    
+    // 检查任务是否已存在，避免重复创建
+    TaskHandle_t task_handle = xTaskGetHandle(MMC_TASK_NAME);
+    if (task_handle == NULL) {
+        xTaskCreatePinnedToCore(i2c0_mmc56x3_task, MMC_TASK_NAME, MMC_TASK_STACK_SIZE, NULL, MMC_TASK_PRIORITY, NULL, 0);
+    } else {
+        ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "Task %s already exists, skipping creation", MMC_TASK_NAME);
+    }
+    
+    // Clear the interrupt status
+    gpio_intr_disable(gpio_num);
+    //ets_delay_us(10); // Simple debounce
+    gpio_intr_enable(gpio_num);
+}
+
+// Initialize GPIO interrupt
+void gpio_interrupt_init(void)
+{
+    // Configure GPIO pin
+    gpio_config_t io_conf = {};
+    io_conf.intr_type = GPIO_INTR_POSEDGE;      // Falling edge interrupt
+    io_conf.pin_bit_mask = (1ULL << GPIO_INTERRUPT_PIN);
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;    // Enable pull-up resistor
+    io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    gpio_config(&io_conf);
+    
+    // Install GPIO ISR service
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    
+    // Hook ISR handler for specific GPIO pin
+    gpio_isr_handler_add(GPIO_INTERRUPT_PIN, gpio_isr_handler, (void*) GPIO_INTERRUPT_PIN);
+    
+    ESP_LOGI(GPIO_INTERRUPT_TAG, "GPIO %d falling edge interrupt initialized", GPIO_INTERRUPT_PIN);
+}
 
 
 
@@ -269,14 +350,11 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
 
 _Noreturn void app_main(void) {
 
-
   IIC_init();
-  SI523_Init(i2c0_bus_hdl);
-  SI523_CheckVer();
-  PCD_SI523_TypeA_Init();
-PCD_SI523_TypeA();
-  /* create task pinned to the app core */
-  //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+  gpio_interrupt_init();
+
+  // 移除自动创建任务，改为按键触发
+  // xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
   //xTaskCreate(BlinkLed, "BlinkLed", 1024 * 4, NULL, 1, NULL);
@@ -288,7 +366,9 @@ PCD_SI523_TypeA();
       ESP_LOGI("app_main", "Task PrintChipInfo delete.");
     }
   }
-
+  while (1) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
 
 
 
@@ -349,17 +429,17 @@ PCD_SI523_TypeA();
 
 
   // 启动 LVGL widgets demo
-// #if LV_USE_DEMO_WIDGETS
-//   ESP_LOGI(__FILENAME__, "Starting LVGL Widgets Demo");
-//   lv_demo_widgets();
-// #else
-//   // 如果没有启用 demo widgets，显示简单的 Hello world
-//   lv_obj_t *label = lv_label_create(lv_scr_act());
-//   if (NULL != label) {
-//     lv_label_set_text(label, "Hello world\nLV_USE_DEMO_WIDGETS is disabled.\nEnable it in menuconfig.");
-//     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-//   }
-// #endif
+  // #if LV_USE_DEMO_WIDGETS
+  //   ESP_LOGI(__FILENAME__, "Starting LVGL Widgets Demo");
+  //   lv_demo_widgets();
+  // #else
+  //   // 如果没有启用 demo widgets，显示简单的 Hello world
+  //   lv_obj_t *label = lv_label_create(lv_scr_act());
+  //   if (NULL != label) {
+  //     lv_label_set_text(label, "Hello world\nLV_USE_DEMO_WIDGETS is disabled.\nEnable it in menuconfig.");
+  //     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+  //   }
+  // #endif
 
     // 创建全屏背景图片
     lv_obj_t *bg_img = lv_img_create(lv_scr_act());
@@ -394,9 +474,9 @@ PCD_SI523_TypeA();
     if (time_label != NULL) {
         lv_label_set_text_fmt(time_label, "Uptime: %lus", uptime_seconds);
     }
-
     lv_task_handler();
   }
+
 
   free(buf1);
   free(buf2);

@@ -21,8 +21,6 @@
 17. PcdRead - 读取M1卡一块数据
 18. PcdWrite - 写数据到M1卡一块
 19. PCD_SI523_TypeA_Init - 读A卡初始化配置
-
-
 20. PCD_SI523_TypeA_GetUID - 读取A卡UID
 21. PCD_SI523_TypeA_rw_block - 读A卡扇区
 22. PCD_SI523_TypeB_Init - 读B卡初始化配置
@@ -31,9 +29,6 @@
 25. PCD_SI523_IdentityCard_GetUID - 读取二代身份证UID
 26. PcdReset - 复位RC522
 27. I_SI523_ClearBitMask - 清除寄存器的特定位
-28. I
-
-继续补充剩余的函数列表，包括设备接口和辅助功能。这些函数主要涵盖SI523设备的各种操作，包括复位、位操作、ACD模式和卡片管理等关键功能。
 
 29. I_SI523_SetBitMask - 允许精确控制设备寄存器状态
 30. I_SI523_SiModifyReg - 提供灵活的寄存器修改能力

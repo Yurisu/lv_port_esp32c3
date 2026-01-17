@@ -204,7 +204,7 @@ unsigned char I_SI523_IO_Read(unsigned char RegAddr);
 
 void PcdAntennaOn(void);
 void PcdAntennaOff(void);
-void CalulateCRC(unsigned char *pIndata,unsigned char len,unsigned char *pOutData);
+char CalulateCRC(unsigned char *pIndata,unsigned char len,unsigned char *pOutData);
 
 char PcdComMF522(unsigned char Command, unsigned char *pInData, unsigned char InLenByte,unsigned char *pOutData, unsigned int *pOutLenBit);
 
@@ -217,6 +217,7 @@ char PcdSelect3 (unsigned char * pSnr, unsigned char *sak);
 char PcdHalt(void);
 
 char PcdAuthState(unsigned char auth_mode,unsigned char addr,unsigned char *pKey,unsigned char *pSnr);
+char PcdNTAG216_Auth(unsigned char *password, unsigned char *pACK);
 char PcdWrite (unsigned char ucAddr, unsigned char * pData );
 char PcdRead (unsigned char ucAddr, unsigned char * pData );
 
@@ -240,6 +241,7 @@ void Pcd_Hard_Reset(void); //硬复位
 void I_SI523_ClearBitMask(unsigned char reg,unsigned char mask);
 void I_SI523_SetBitMask(unsigned char reg,unsigned char mask);
 void I_SI523_SiModifyReg(unsigned char RegAddr, unsigned char ModifyVal, unsigned char MaskByte);
+void PICC_DumpMifareUltralightToLog(void);
 
 
 
@@ -267,7 +269,11 @@ void PCD_ACD_AutoCalc(void);
 void PCD_ACD_Init(void);
 char PCD_IRQ(void);
 
-void SI523_CheckVer( void );
+char SI523_read_NTAG(unsigned char page, unsigned char *buffer);
+char SI523_write_NTAG(unsigned char page, unsigned char *buffer);
+
+char SI523_write_YURIDATA(void);
+unsigned char SI523_CheckVer( void );
 unsigned char SI523_TypeA_GetUID( unsigned char *id );
 void GetLastCardID( unsigned char *id );
 

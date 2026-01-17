@@ -1,0 +1,147 @@
+
+I (110741) SI523: IC Version: 0xA1
+I (110741) SI523: Test_Si522_GetCard
+I (110771) SI523: No card detected
+I (110771) SI523: Request:fail
+I (120771) SI523: IC Version: 0xA1
+I (120771) SI523: Test_Si522_GetCard
+I (120801) SI523: No card detected
+I (120801) SI523: Request:fail
+
+
+
+
+I (150861) SI523: IC Version: 0xA1
+I (150861) SI523: Test_Si522_GetCard
+I (150871) SI523: Card detected: ATQA=4400
+I (150871) SI523: Request:ok  ATQA=44 00
+I (150881) SI523: UID: 881D288B
+I (150881) SI523: Anticoll:ok  UID=88 1D 28 8B
+I (150901) SI523: Card selected: SAK=0x04
+I (150901) SI523: Select:ok  SAK=04
+E (150941) SI523: Auth failed: mode=0x60, addr=04
+I (150941) SI523: Authenticate:fail
+
+
+I (15) boot: ESP-IDF v5.3.4-dirty 2nd stage bootloader
+I (16) boot: compile time Jan 12 2026 01:36:19
+I (16) boot: chip revision: v0.4
+I (16) boot: efuse block revision: v1.3
+I (16) boot.esp32c3: SPI Speed      : 80MHz
+I (16) boot.esp32c3: SPI Mode       : DIO
+I (16) boot.esp32c3: SPI Flash Size : 4MB
+I (17) boot: Enabling RNG early entropy source...
+I (17) boot: Partition Table:
+I (17) boot: ## Label            Usage          Type ST Offset   Length
+I (17) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (17) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (18) boot:  2 factory          factory app      00 00 00010000 00200000
+I (18) boot:  3 littlefs         Unknown data     01 83 00210000 00100000
+I (18) boot: End of partition table
+I (19) esp_image: segment 0: paddr=00010020 vaddr=3c020020 size=0b3bch ( 46012) map
+I (26) esp_image: segment 1: paddr=0001b3e4 vaddr=3fc8c800 size=01578h (  5496) load
+I (28) esp_image: segment 2: paddr=0001c964 vaddr=40380000 size=036b4h ( 14004) load
+I (31) esp_image: segment 3: paddr=00020020 vaddr=42000020 size=1ce30h (118320) map
+I (50) esp_image: segment 4: paddr=0003ce58 vaddr=403836b4 size=09114h ( 37140) load
+I (61) boot: Loaded app from partition at offset 0x10000
+I (61) boot: Disabling RNG early entropy source...
+I (61) cpu_start: Unicore app
+I (125) cpu_start: Pro cpu start user code
+I (125) cpu_start: cpu freq: 160000000 Hz
+I (125) app_init: Application information:
+I (125) app_init: Project name:     lvgl-demo
+I (125) app_init: App version:      64eddcb-dirty
+I (125) app_init: Compile time:     Jan 15 2026 20:05:50
+I (126) app_init: ELF file SHA256:  1f1326141...
+I (126) app_init: ESP-IDF:          v5.3.4-dirty
+I (126) efuse_init: Min chip rev:     v0.3
+I (126) efuse_init: Max chip rev:     v1.99 
+I (126) efuse_init: Chip rev:         v0.4
+I (126) heap_init: Initializing. RAM available for dynamic allocation:
+I (127) heap_init: At 3FC8ECC0 len 00031340 (196 KiB): RAM
+I (127) heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
+I (127) heap_init: At 3FCDC710 len 00002950 (10 KiB): Retention RAM
+I (127) heap_init: At 50000000 len 00001FE8 (7 KiB): RTCRAM
+I (128) spi_flash: detected chip: generic
+I (128) spi_flash: flash io: dio
+I (129) sleep: Configure to isolate all GPIO pins in sleep state
+I (129) sleep: Enable automatic switching of GPIO sleep configuration
+I (129) pm: Frequency switching config: CPU_MAX: 160, APB_MAX: 80, APB_MIN: 40, Light sleep: DISABLED
+I (130) coexist: coex firmware version: a13b09d
+I (130) coexist: coexist rom version 9387209
+I (131) main_task: Started on CPU0
+I (131) main_task: Calling app_main()
+I (131) gpio: GPIO[9]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 
+I (131) gpio: GPIO[8]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0 
+I (141) SI523: Initializing SI523 handle
+I (151) SI523: SI523 initialized successfully at address 0x28
+I (151) SI523: IC Version: 0xA1
+I (151) SI523: Starting TypeA card reading loop
+I (151) SI523: IC Version: 0xA1
+I (191) SI523: No card detected
+I (201) SI523: Card detected: ATQA=4400
+I (201) SI523: Request2 ok: ATQA=4400
+I (211) SI523: UID: 881D288B
+I (221) SI523: CRC calculation success: CRCResultRegL=0xEF, CRCResultRegH=0xB8
+I (231) SI523: Card selected: SAK=0x04
+I (231) SI523: Select1 ok: SAK=04
+I (251) SI523: UID: 8B0D1080
+I (251) SI523: CRC calculation success: CRCResultRegL=0x89, CRCResultRegH=0xBB
+I (271) SI523: Card selected: SAK=0x00
+I (271) SI523: Select2 ok: SAK=00
+I (271) SI523: GetUID: 1D288B8B0D1080
+I (271) SI523: Page  0  1  2  3
+I (271) SI523: CRC calculation success: CRCResultRegL=0x02, CRCResultRegH=0xA8
+I (291) SI523: Read block 00: 1D288B36...
+I (291) SI523:   0   1D 28 8B 36
+I (291) SI523:   1   8B 00D 10 80
+I (291) SI523:   2   16 C0 000 000
+I (291) SI523:   3   E1 10 12 000
+I (301) SI523: CRC calculation success: CRCResultRegL=0x26, CRCResultRegH=0xEE
+I (321) SI523: Read block 04: 0103A00C...
+I (321) SI523:   4   001 003 A0 00C
+I (321) SI523:   5   34 003 00B D1
+I (321) SI523:   6   001 007 54 002
+I (321) SI523:   7   7A 68 34 33
+I (321) SI523: CRC calculation success: CRCResultRegL=0x4A, CRCResultRegH=0x24
+I (341) SI523: Read block 08: 3231FE00...
+I (341) SI523:   8   32 31 FE 000
+I (341) SI523:   9   000 000 000 000
+I (341) SI523:  10   000 000 000 000
+I (341) SI523:  11   000 000 000 000
+I (351) SI523: CRC calculation success: CRCResultRegL=0x6E, CRCResultRegH=0x62
+I (371) SI523: Read block 0C: 00000000...
+I (371) SI523:  12   000 000 000 000
+I (371) SI523:  13   000 000 000 000
+I (371) SI523:  14   000 000 000 000
+I (371) SI523:  15   000 000 000 000
+
+I (20841) SI523: Page  0  1  2  3
+I (20851) SI523: CRC calculation success: CRCResultRegL=0x02, CRCResultRegH=0xA8
+I (20871) SI523: PcdComMF522: status=0, ErrorReg=00
+I (20871) SI523: Read block 00: 1D288B36...
+I (20871) SI523:   0   1D 28 8B 36
+I (20871) SI523:   1   8B 00D 10 80
+I (20871) SI523:   2   16 C0 000 000
+I (20871) SI523:   3   E1 10 12 000
+I (20871) SI523: CRC calculation success: CRCResultRegL=0x26, CRCResultRegH=0xEE
+I (20891) SI523: PcdComMF522: status=0, ErrorReg=00
+I (20891) SI523: Read block 04: 3A303A38...
+I (20891) SI523:   4   3A 30 3A 38
+I (20891) SI523:   5   34 003 00B D1
+I (20891) SI523:   6   001 007 54 002
+I (20891) SI523:   7   7A 68 34 33
+I (20901) SI523: CRC calculation success: CRCResultRegL=0x4A, CRCResultRegH=0x24
+I (20921) SI523: PcdComMF522: status=0, ErrorReg=00
+I (20921) SI523: Read block 08: 3231FE00...
+I (20921) SI523:   8   32 31 FE 000
+I (20921) SI523:   9   000 000 000 000
+I (20921) SI523:  10   000 000 000 000
+I (20921) SI523:  11   000 000 000 000
+I (20921) SI523: CRC calculation success: CRCResultRegL=0x6E, CRCResultRegH=0x62
+I (20941) SI523: PcdComMF522: status=0, ErrorReg=00
+I (20941) SI523: Read block 0C: 00000000...
+I (20941) SI523:  12   000 000 000 000
+I (20941) SI523:  13   000 000 000 000
+I (20941) SI523:  14   000 000 000 000
+I (20941) SI523:  15   000 000 000 000
