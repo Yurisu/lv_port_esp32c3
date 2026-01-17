@@ -25,7 +25,7 @@
 #include "lvgl_helpers.h"
 #include "lv_port_fs.h"
 
-#include <mmc56x3.h>
+#include "mmc56x3.h"
 #include "SI523_App.h"
 
 
@@ -35,14 +35,20 @@
 #endif
 
 #define I2C0_MASTER_PORT               I2C_NUM_0
-#define I2C0_MASTER_SDA_IO             GPIO_NUM_9 // blue
-#define I2C0_MASTER_SCL_IO             GPIO_NUM_8 // yellow
+#define I2C0_MASTER_SDA_IO             GPIO_NUM_9
+#define I2C0_MASTER_SCL_IO             GPIO_NUM_8 
+#define NPD_EN_GPIO                    GPIO_NUM_10
+
+#define GPIO_INTERRUPT_PIN             GPIO_NUM_21
+#define GPIO_INTERRUPT_TAG             "GPIO_ISR"
+
+void NPD_EN(int state);
 
 #define LED_4 6
 #define LED_5 6
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
-static bool g_task_run = false;
+volatile bool g_task_run = false;
 
 void lv_tick_task(void *arg) {
   (void) arg;
@@ -168,18 +174,10 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
     //
     int status = 10;
     unsigned char carduid[10];
-    unsigned char data[16];
+    unsigned char cardpid[16];
     
-    SI523_Init(i2c0_bus_hdl);
-
-        // init device
-    mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
-    if (dev_hdl == NULL) {
-        ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
-        assert(dev_hdl);
-    }
-    //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
-
+    // 初始状态：保持下电
+    NPD_EN(0);
 
   while (1)
   {
@@ -188,15 +186,40 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
+    // 按键触发，开始上电初始化
+    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
+    
+    // 上电并等待模块稳定
+    NPD_EN(1);
+    vTaskDelay(50 / portTICK_PERIOD_MS);  // 等待50ms让电源稳定
+    
+    // 初始化SI523
+    SI523_Init(i2c0_bus_hdl);
+    vTaskDelay(10 / portTICK_PERIOD_MS);  // 等待10ms让SI523初始化完成
+    
+    // 初始化MMC56X3
+    mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
+    if (dev_hdl == NULL) {
+        ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
+        NPD_EN(0);  // 初始化失败，下电
+        assert(dev_hdl);
+    }
+    //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
+
     if(SI523_CheckVer() != 0){
       PCD_SI523_TypeA_Init();
       //PCD_SI523_TypeA();
-      if(SI523_TypeA_GetUID(carduid)==1){
-        if(SI523_read_NTAG(12, data) == MI_OK){
-          ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X", data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
+      if(PCD_SI523_TypeA_GetUID()==0){
+        if(SI523_read_NTAG(12, cardpid) == MI_OK){
+          ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
         }
-      //SI523_write_YURIDATA(void)== MI_OK
-      //SI523_write_NTAG(unsigned char page, unsigned char *buffer) == MI_OK
+        // if(SI523_write_YURIDATA() == MI_OK){
+        //   ESP_LOGI(MMC_TAG, "YURIDATA write successful");
+        // }
+        // memccpy(cardpid, "9876", 4, 4);
+        // if(SI523_write_NTAG(12, cardpid) == MI_OK){
+        //   ESP_LOGI(MMC_TAG, "NTAG write successful");
+        // }
 
     }}
 
@@ -205,31 +228,28 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
     // task loop entry point - 只执行一次测量
     for(int i = 0; i < status; i++) {
         //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
-        
-        // 磁力测量复位校准
-        // ESP_LOGI(MMC_TAG, "Performing MMC56X3 calibration...");
-        // mmc56x3_magnetic_set_reset(dev_hdl);
-        // vTaskDelay(1000 / portTICK_PERIOD_MS); // 等待校准完成
-        // ESP_LOGI(MMC_TAG, "MMC56X3 calibration completed");
-        // handle sensor
         mmc56x3_magnetic_axes_data_t magnetic_axes;
         esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
         if(result != ESP_OK) {
             ESP_LOGE(MMC_TAG, "mmc56x3 device read failed (%s)", esp_err_to_name(result));
         } else {
-            ESP_LOGI(MMC_TAG, "Compass X-Axis:  %f mG", magnetic_axes.x_axis);
-            ESP_LOGI(MMC_TAG, "Compass Y-Axis:  %f mG", magnetic_axes.y_axis);
-            ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
-            ESP_LOGI(MMC_TAG, "Compass Heading: %f °", mmc56x3_convert_to_heading(magnetic_axes));
-            ESP_LOGI(MMC_TAG, "True Heading:    %f °", mmc56x3_convert_to_true_heading(dev_hdl->dev_config.declination, magnetic_axes));
+            //ESP_LOGI(MMC_TAG, "Compass X-Axis:  %f mG", magnetic_axes.x_axis);
+            //ESP_LOGI(MMC_TAG, "Compass Y-Axis:  %f mG", magnetic_axes.y_axis);
+            //ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
+            //ESP_LOGI(MMC_TAG, "Compass Heading: %f °", mmc56x3_convert_to_heading(magnetic_axes));
+            ESP_LOGI(MMC_TAG, "True Heading:    %d °", (int)(mmc56x3_convert_to_true_heading(dev_hdl->dev_config.declination, magnetic_axes)));
             // 成功读取一次数据后退出循环
             break;
         }
         //
         //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
         // pause between attempts
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(200 / portTICK_PERIOD_MS);
     }
+    
+    // 测量完成，下电节省电量
+    ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
+    NPD_EN(0);
   }
     //
     // free resources
@@ -242,9 +262,6 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
 
 
 
-#define GPIO_INTERRUPT_PIN             GPIO_NUM_21
-#define GPIO_INTERRUPT_TAG             "GPIO_ISR"
-
 // GPIO interrupt handler
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
@@ -253,8 +270,10 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
     
     // Send notification to task (optional, for debouncing or complex handling)
     // For simple logging, we can directly log here
-    ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
-    g_task_run = true;
+    if(!g_task_run) {
+        ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
+        g_task_run = true;
+    }
     // 检查任务是否已存在，避免重复创建
     // TaskHandle_t task_handle = xTaskGetHandle(MMC_TASK_NAME);
     // if (task_handle == NULL) {
@@ -267,6 +286,22 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
     gpio_intr_disable(gpio_num);
     //ets_delay_us(10); // Simple debounce
     gpio_intr_enable(gpio_num);
+}
+
+
+// NPD enable function
+void NPD_EN(int state)
+{
+    gpio_set_level(NPD_EN_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
+}
+
+// Initialize NPD_EN GPIO10 as output with low level
+static void npd_gpio_init(void)
+{
+    gpio_reset_pin(NPD_EN_GPIO);
+    gpio_set_direction(NPD_EN_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(NPD_EN_GPIO, LOW_LEVEL);
+    ESP_LOGI("NPD_EN", "GPIO %d configured as output, default level: LOW", NPD_EN_GPIO);
 }
 
 // Initialize GPIO interrupt
@@ -353,6 +388,7 @@ void gpio_interrupt_init(void)
 _Noreturn void app_main(void) {
 
   IIC_init();
+  npd_gpio_init();
   gpio_interrupt_init();
 
   // 自动创建任务，按键触发

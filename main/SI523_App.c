@@ -251,7 +251,7 @@ char CalulateCRC(unsigned char *pIndata, unsigned char len, unsigned char *pOutD
 			I_SI523_IO_Write(CommandReg, PCD_IDLE); // 停止计算
 			pOutData[0] = I_SI523_IO_Read(CRCResultRegL);
 			pOutData[1] = I_SI523_IO_Read(CRCResultRegH);
-			ESP_LOGI(TAG, "CRC calculation success: CRCResultRegL=0x%02X, CRCResultRegH=0x%02X", pOutData[0], pOutData[1]);
+			ESP_LOGD(TAG, "CRC calculation success: CRCResultRegL=0x%02X, CRCResultRegH=0x%02X", pOutData[0], pOutData[1]);
 			return MI_OK;
 		}
 	}
@@ -369,7 +369,7 @@ char PcdComMF522(unsigned char Command,
    
     I_SI523_SetBitMask(ControlReg,0x80);           // stop timer now
     I_SI523_IO_Write(CommandReg,PCD_IDLE); 
-	ESP_LOGI(TAG, "PcdComMF522: status=%d, ErrorReg=%02X", status, I_SI523_IO_Read(ErrorReg));
+	ESP_LOGD(TAG, "PcdComMF522: status=%d, ErrorReg=%02X", status, I_SI523_IO_Read(ErrorReg));
     return status;
 }
                      
@@ -403,12 +403,12 @@ char PcdRequest(unsigned char req_code,unsigned char *pTagType)
 	{    
 		*pTagType     = ucComMF522Buf[0];
 		*(pTagType+1) = ucComMF522Buf[1];
-        ESP_LOGI(TAG, "Card detected: ATQA=%02X%02X", ucComMF522Buf[0], ucComMF522Buf[1]);
+        ESP_LOGD(TAG, "Card detected: ATQA=%02X%02X", ucComMF522Buf[0], ucComMF522Buf[1]);
 	}
 	else
 	{   
 		status = MI_ERR;   
-        ESP_LOGI(TAG, "No card detected");
+        ESP_LOGD(TAG, "No card detected");
 	}
    
 	return status;
@@ -451,7 +451,7 @@ char PcdAnticoll(unsigned char *pSnr, unsigned char anticollision_level)
 		}
         else
         {
-            ESP_LOGI(TAG, "UID: %02X%02X%02X%02X", pSnr[0], pSnr[1], pSnr[2], pSnr[3]);
+            ESP_LOGD(TAG, "UID: %02X%02X%02X%02X", pSnr[0], pSnr[1], pSnr[2], pSnr[3]);
         }
     }
     else
@@ -494,7 +494,7 @@ char PcdSelect (unsigned char * pSnr, unsigned char *sak)
     {   
 		*sak = ucComMF522Buf[0];
 		status = MI_OK;  
-        ESP_LOGI(TAG, "Card selected: SAK=0x%02X", *sak);
+        ESP_LOGD(TAG, "Card selected: SAK=0x%02X", *sak);
 	}
     else
     {   
@@ -536,7 +536,7 @@ char PcdSelect1 (unsigned char * pSnr, unsigned char *sak)
     {   
 		*sak = ucComMF522Buf[0];
 		status = MI_OK;  
-        ESP_LOGI(TAG, "Card selected: SAK=0x%02X", *sak);
+        ESP_LOGD(TAG, "Card selected: SAK=0x%02X", *sak);
 	}
     else
     {   
@@ -578,7 +578,7 @@ char PcdSelect2 (unsigned char * pSnr, unsigned char *sak)
     {   
 		*sak = ucComMF522Buf[0];
 		status = MI_OK;  
-        ESP_LOGI(TAG, "Card selected: SAK=0x%02X", *sak);
+        ESP_LOGD(TAG, "Card selected: SAK=0x%02X", *sak);
 	}
     else
     {   
@@ -620,7 +620,7 @@ char PcdSelect3 (unsigned char * pSnr, unsigned char *sak)
     {   
 		*sak = ucComMF522Buf[0];
 		status = MI_OK;  
-        ESP_LOGI(TAG, "Card selected: SAK=0x%02X", *sak);
+        ESP_LOGD(TAG, "Card selected: SAK=0x%02X", *sak);
 	}
     else
     {   
@@ -679,7 +679,7 @@ char PcdAuthState(unsigned char auth_mode,unsigned char addr,unsigned char *pKey
 	}
     else
     {
-        ESP_LOGI(TAG, "Auth ok: mode=0x%02X, addr=%02X", auth_mode, addr);
+        ESP_LOGD(TAG, "Auth ok: mode=0x%02X, addr=%02X", auth_mode, addr);
     }
     
     return status;
@@ -707,7 +707,7 @@ char PcdRead(unsigned char addr,unsigned char *pData)
     if ((status == MI_OK) && (unLen == 0x90))
    	{   
 		memcpy(pData, ucComMF522Buf, 16);   
-        ESP_LOGI(TAG, "Read block %02X: %02X%02X%02X%02X...", 
+        ESP_LOGD(TAG, "Read block %02X: %02X%02X%02X%02X...", 
                  addr, pData[0], pData[1], pData[2], pData[3]);
 	}
     else
@@ -731,7 +731,7 @@ char PcdWrite(unsigned char addr,unsigned char *pData)
     unsigned int unLen;
     unsigned char ucComMF522Buf[MAXRLEN]; 
     
-    ESP_LOGI(TAG, "Write block %02X: %02X%02X%02X%02X...", 
+    ESP_LOGD(TAG, "Write block %02X: %02X%02X%02X%02X...", 
              addr, pData[0], pData[1], pData[2], pData[3]);
     
     ucComMF522Buf[0] = PICC_WRITE;
@@ -817,22 +817,22 @@ char PCD_SI523_TypeA_GetUID(void)
 			I_SI523_IO_Write(RFCfgReg, 0x58);
 			if(PcdRequest( PICC_REQIDL, ATQA) != MI_OK)
 			{	
-				ESP_LOGI(TAG, "Request failed");
+				ESP_LOGD(TAG, "Request failed");
 				return 1;
 			}
 			else
 			{
-				ESP_LOGI(TAG, "Request1 ok: ATQA=%02X%02X", ATQA[0],ATQA[1]);
+				ESP_LOGD(TAG, "Request1 ok: ATQA=%02X%02X", ATQA[0],ATQA[1]);
 			}	
 		}
 		else
 		{
-			ESP_LOGI(TAG, "Request2 ok: ATQA=%02X%02X", ATQA[0],ATQA[1]);
+			ESP_LOGD(TAG, "Request2 ok: ATQA=%02X%02X", ATQA[0],ATQA[1]);
 		}		
 	}
 	else
 	{
-		ESP_LOGI(TAG, "Request3 ok: ATQA=%02X%02X", ATQA[0],ATQA[1]);
+		ESP_LOGD(TAG, "Request3 ok: ATQA=%02X%02X", ATQA[0],ATQA[1]);
 	}
 	
 	
@@ -840,7 +840,7 @@ char PCD_SI523_TypeA_GetUID(void)
 	//Anticoll 冲突检测 level1
 	if(PcdAnticoll(UID, PICC_ANTICOLL1)!= MI_OK) 
 	{
-		ESP_LOGI(TAG, "Anticoll1 failed");
+		ESP_LOGD(TAG, "Anticoll1 failed");
 		return 1;		
 	}
 	else
@@ -848,12 +848,12 @@ char PCD_SI523_TypeA_GetUID(void)
 		//选定卡片
 		if(PcdSelect1(UID,&SAK)!= MI_OK)
 		{
-			ESP_LOGI(TAG, "Select1 failed");
+			ESP_LOGD(TAG, "Select1 failed");
 			return 1;		
 		}
 		else
 		{
-			ESP_LOGI(TAG, "Select1 ok: SAK=%02X", SAK);
+			ESP_LOGD(TAG, "Select1 ok: SAK=%02X", SAK);
 			if(SAK&0x04)                         
 			{
 				UID_complate1 = 0;
@@ -864,19 +864,19 @@ char PCD_SI523_TypeA_GetUID(void)
 					//Anticoll 冲突检测 level2
 					if(PcdAnticoll(UID+4, PICC_ANTICOLL2)!= MI_OK) 
 					{
-						ESP_LOGI(TAG, "Anticoll2 failed");
+						ESP_LOGD(TAG, "Anticoll2 failed");
 						return 1;		
 					}
 					else
 					{
 						if(PcdSelect2(UID+4,&SAK)!= MI_OK)  
 						{
-							ESP_LOGI(TAG, "Select2 failed");
+							ESP_LOGD(TAG, "Select2 failed");
 							return 1;		
 						}
 						else
 						{
-							ESP_LOGI(TAG, "Select2 ok: SAK=%02X", SAK);
+							ESP_LOGD(TAG, "Select2 ok: SAK=%02X", SAK);
 							if(SAK&0x04)                         
 							{
 								UID_complate2 = 0;
@@ -887,26 +887,26 @@ char PCD_SI523_TypeA_GetUID(void)
 									//Anticoll 冲突检测 level3
 									if(PcdAnticoll(UID+8, PICC_ANTICOLL3)!= MI_OK) 
 									{
-										ESP_LOGI(TAG, "Anticoll3 failed");
+										ESP_LOGD(TAG, "Anticoll3 failed");
 										return 1;		
 									}
 									else
 									{
 										if(PcdSelect3(UID+8,&SAK)!= MI_OK)  
 										{
-											ESP_LOGI(TAG, "Select3 failed");
+											ESP_LOGD(TAG, "Select3 failed");
 											return 1;		
 										}
 										else
 										{
-											ESP_LOGI(TAG, "Select3 ok: SAK=%02X", SAK);
+											ESP_LOGD(TAG, "Select3 ok: SAK=%02X", SAK);
 											if(SAK&0x04)                          
 											{
 												//UID_complate3 = 0;
 											}
 											else 
 											{
-												ESP_LOGI(TAG, "GetUID: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+												ESP_LOGD(TAG, "GetUID: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
 												UID[1],UID[2],UID[3],UID[5],UID[6],UID[7],UID[8],UID[9],UID[10],UID[11]);									
 											}					
 										}							
@@ -916,7 +916,7 @@ char PCD_SI523_TypeA_GetUID(void)
 							else 
 							{
 								UID_complate2 = 1;                  
-								ESP_LOGI(TAG, "GetUID: %02X%02X%02X%02X%02X%02X%02X",
+								ESP_LOGD(TAG, "GetUID: %02X%02X%02X%02X%02X%02X%02X",
 								UID[1],UID[2],UID[3],UID[4],UID[5],UID[6],UID[7]);
 							}	
 						}			
@@ -926,7 +926,7 @@ char PCD_SI523_TypeA_GetUID(void)
 			else 
 			{
 				UID_complate1 = 1;                   
-				ESP_LOGI(TAG, "GetUID: %02X%02X%02X%02X", UID[0],UID[1],UID[2],UID[3]);
+				ESP_LOGD(TAG, "GetUID: %02X%02X%02X%02X", UID[0],UID[1],UID[2],UID[3]);
 			}
 		}		
 	}
@@ -960,7 +960,7 @@ char PCD_SI523_TypeA_rw_block(void)
 	unsigned char DefaultKeyABuf[10] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 	// printf("\r\n\r\nTest_Si522_GetCard");
-	ESP_LOGI(TAG, "Test_Si522_GetCard");
+	ESP_LOGD(TAG, "Test_Si522_GetCard");
 	
 	//request 寻卡
 	if( PcdRequest( PICC_REQIDL, ATQA) != MI_OK )  //寻天线区内未进入休眠状态的卡，返回卡片类型 2字节
@@ -1150,7 +1150,6 @@ void PCD_SI523_TypeA(void)
 char SI523_read_NTAG(unsigned char page, unsigned char *buffer)
 {
 	ESP_LOGI(TAG, "Starting NTAG card reading");
-	PCD_SI523_TypeA_GetUID();
 	return PcdRead(page, buffer);
 }
 
@@ -1607,7 +1606,7 @@ char PCD_IRQ(void)
 unsigned char SI523_CheckVer( void )
 {
     unsigned char version = I_SI523_IO_Read(VersionReg);
-    ESP_LOGI(TAG, "IC Version: 0x%02X", version);
+    ESP_LOGD(TAG, "IC Version: 0x%02X", version);
 	return version;
 }
 
