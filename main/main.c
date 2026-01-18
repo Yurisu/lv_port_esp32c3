@@ -41,6 +41,31 @@
 #include "esp_mac.h" // 标准MAC API
 #include "esp_bt_device.h"
 
+// 图片传输协议相关定义
+#define CMD_INIT_FRAME          0xD1  // 初始化帧
+#define CMD_DATA_FRAME          0xD2  // 数据帧
+#define MAX_FILENAME_LEN        64
+#define MAX_FILE_SIZE           1024 * 1024  // 最大1MB
+
+// 协议状态枚举
+typedef enum {
+    PROTOCOL_STATE_IDLE = 0,        // 空闲状态
+    PROTOCOL_STATE_RECEIVING_INIT,  // 接收初始化帧
+    PROTOCOL_STATE_RECEIVING_DATA   // 接收数据帧
+} protocol_state_t;
+
+// 协议数据结构
+typedef struct {
+    protocol_state_t state;
+    uint8_t filename[MAX_FILENAME_LEN];
+    uint32_t file_size;
+    uint32_t received_size;
+    lv_fs_file_t file_handle;       // 文件句柄
+    bool file_open;                // 文件是否已打开
+    uint32_t max_packet_num;        // 最大接收包号（用于去重）
+    bool transfer_error;            // 传输错误标志
+} image_transfer_protocol_t;
+
 //hid
 #include "hidd_le_prf_int.h"
 #include "esp_hidd_prf_api.h"
@@ -57,6 +82,38 @@ static uint16_t hid_conn_id = 0;
 static bool sec_conn = false;
 static bool send_volum_up = false;
 #define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
+
+// 图片传输协议全局变量
+static image_transfer_protocol_t g_img_protocol = {
+    .state = PROTOCOL_STATE_IDLE,
+    .file_size = 0,
+    .received_size = 0,
+    .file_open = false,
+    .max_packet_num = 0,
+    .transfer_error = false
+};
+
+// Checksum16 计算函数 (大端序)
+static uint16_t checksum16(const uint8_t *data, uint16_t len) {
+    uint16_t sum = 0;
+    for (uint16_t i = 0; i < len; i++) {
+        sum += data[i];
+    }
+    return sum;
+}
+
+// 大端序转uint32_t
+static uint32_t be_to_u32(const uint8_t *data) {
+    return ((uint32_t)data[0] << 24) |
+           ((uint32_t)data[1] << 16) |
+           ((uint32_t)data[2] << 8) |
+           (uint32_t)data[3];
+}
+
+// 大端序转uint16_t
+static uint16_t be_to_u16(const uint8_t *data) {
+    return ((uint16_t)data[0] << 8) | (uint16_t)data[1];
+}
 
 
 
@@ -427,14 +484,268 @@ void gpio_interrupt_init(void)
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;    // Enable pull-up resistor
     io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
     gpio_config(&io_conf);
-    
+
     // Install GPIO ISR service
     gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-    
+
     // Hook ISR handler for specific GPIO pin
     gpio_isr_handler_add(GPIO_INTERRUPT_PIN, gpio_isr_handler, (void*) GPIO_INTERRUPT_PIN);
-    
+
     ESP_LOGI(GPIO_INTERRUPT_TAG, "GPIO %d falling edge interrupt initialized", GPIO_INTERRUPT_PIN);
+}
+
+// 重置协议状态
+static void reset_protocol_state(void) {
+    if (g_img_protocol.file_open) {
+        lv_fs_close(&g_img_protocol.file_handle);
+        g_img_protocol.file_open = false;
+        ESP_LOGI("ImgProtocol", "File closed");
+    }
+    memset(&g_img_protocol, 0, sizeof(image_transfer_protocol_t));
+    g_img_protocol.state = PROTOCOL_STATE_IDLE;
+    g_img_protocol.max_packet_num = 0;
+    ESP_LOGI("ImgProtocol", "Protocol state reset");
+}
+
+// 处理初始化帧（0xD1命令）
+// 帧结构：命令(1) | checksum(2) | 文件大小(4) | 长度(1) | 文件名(N)
+static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
+    ESP_LOGI("ImgProtocol", "Handling init frame, length=%d", length);
+
+    // 最小帧长度：命令(1) + checksum(2) + 文件大小(4) + 长度(1) + 文件名(1) = 9字节
+    if (length < 9) {
+        ESP_LOGE("ImgProtocol", "Init frame too short: %d < 9", length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t cmd = data[0];
+    uint16_t received_checksum = be_to_u16(&data[1]);
+    uint32_t file_size = be_to_u32(&data[3]);
+    uint8_t filename_len = data[7];
+
+    // 检查命令是否为0xD1
+    if (cmd != CMD_INIT_FRAME) {
+        ESP_LOGE("ImgProtocol", "Invalid init frame command: 0x%02X", cmd);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查文件名长度是否合法
+    if (filename_len == 0 || filename_len >= MAX_FILENAME_LEN) {
+        ESP_LOGE("ImgProtocol", "Invalid filename length: %d", filename_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查总长度是否匹配
+    uint16_t expected_length = 1 + 2 + 4 + 1 + filename_len; // 命令 + checksum + 文件大小 + 长度 + 文件名
+    if (length != expected_length) {
+        ESP_LOGE("ImgProtocol", "Length mismatch: expected %d, got %d", expected_length, length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // 验证checksum（校验数据：文件大小+长度+文件名）
+    uint16_t calc_checksum = checksum16(&data[3], length - 3); // 从文件大小字段开始校验
+    if (received_checksum != calc_checksum) {
+        ESP_LOGE("ImgProtocol", "Checksum error: received=0x%04X, calculated=0x%04X",
+                 received_checksum, calc_checksum);
+        g_img_protocol.transfer_error = true;
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    // 检查文件大小是否合理
+    if (file_size == 0 || file_size > MAX_FILE_SIZE) {
+        ESP_LOGE("ImgProtocol", "Invalid file size: %lu", file_size);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 复制文件名
+    memset(g_img_protocol.filename, 0, MAX_FILENAME_LEN);
+    memcpy(g_img_protocol.filename, &data[8], filename_len);
+    g_img_protocol.filename[filename_len] = '\0';
+
+    ESP_LOGI("ImgProtocol", "Init frame valid - File: %s, Size: %lu bytes",
+             g_img_protocol.filename, file_size);
+
+    // 重置之前的传输状态
+    if (g_img_protocol.file_open) {
+        lv_fs_close(&g_img_protocol.file_handle);
+        g_img_protocol.file_open = false;
+    }
+
+    // 构建完整文件路径
+    char filepath[MAX_FILENAME_LEN + 8];
+    snprintf(filepath, sizeof(filepath), "A:/%s", g_img_protocol.filename);
+
+    // 打开文件准备写入
+    if (lv_fs_open(&g_img_protocol.file_handle, filepath, LV_FS_MODE_WR) != LV_FS_RES_OK) {
+        ESP_LOGE("ImgProtocol", "Failed to open file: %s", filepath);
+        reset_protocol_state();
+        g_img_protocol.transfer_error = true;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 初始化传输参数
+    g_img_protocol.file_size = file_size;
+    g_img_protocol.received_size = 0;
+    g_img_protocol.max_packet_num = 0;
+    g_img_protocol.file_open = true;
+    g_img_protocol.transfer_error = false;
+    g_img_protocol.state = PROTOCOL_STATE_RECEIVING_DATA;
+
+    ESP_LOGI("ImgProtocol", "File opened for writing - Path: %s, Total size: %lu bytes", filepath, file_size);
+
+    return ESP_OK;
+}
+
+// 处理数据帧（0xD2命令）
+// 帧结构：命令(1) | checksum(2) | 包号(4) | 长度(1) | 数据负载(N)
+static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
+    ESP_LOGI("ImgProtocol", "Handling data frame, length=%d", length);
+
+    // 如果之前有错误，拒绝接收数据帧
+    if (g_img_protocol.transfer_error) {
+        ESP_LOGW("ImgProtocol", "Transfer error flag set, ignoring data frame");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 检查是否处于接收数据状态
+    if (g_img_protocol.state != PROTOCOL_STATE_RECEIVING_DATA) {
+        ESP_LOGW("ImgProtocol", "Not in receiving data state, ignoring frame");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 最小帧长度：命令(1) + checksum(2) + 包号(4) + 长度(1) = 8字节
+    if (length < 8) {
+        ESP_LOGE("ImgProtocol", "Data frame too short: %d < 8", length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t cmd = data[0];
+    uint16_t received_checksum = be_to_u16(&data[1]);
+    uint32_t packet_num = be_to_u32(&data[3]);
+    uint8_t payload_len = data[7];
+
+    // 检查命令是否为0xD2
+    if (cmd != CMD_DATA_FRAME) {
+        ESP_LOGE("ImgProtocol", "Invalid data frame command: 0x%02X", cmd);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查总长度是否匹配
+    uint16_t expected_length = 1 + 2 + 4 + 1 + payload_len; // 命令 + checksum + 包号 + 长度 + 负载
+    if (length != expected_length) {
+        ESP_LOGE("ImgProtocol", "Length mismatch: expected %d, got %d", expected_length, length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // 验证checksum（校验数据：包号+长度+负载）
+    uint16_t calc_checksum = checksum16(&data[3], length - 3); // 从包号字段开始校验
+    if (received_checksum != calc_checksum) {
+        ESP_LOGE("ImgProtocol", "Checksum error: received=0x%04X, calculated=0x%04X",
+                 received_checksum, calc_checksum);
+        g_img_protocol.transfer_error = true;
+        reset_protocol_state();
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    // 检查包号是否重复（去重）
+    if (packet_num <= g_img_protocol.max_packet_num) {
+        ESP_LOGW("ImgProtocol", "Duplicate packet: %lu (max=%lu), dropping",
+                 packet_num, g_img_protocol.max_packet_num);
+        return ESP_OK; // 重复包不算错误，只是丢弃
+    }
+
+    // 检查是否有跳包
+    if (packet_num != g_img_protocol.max_packet_num + 1 && g_img_protocol.max_packet_num != 0) {
+        ESP_LOGW("ImgProtocol", "Packet gap detected: expected %lu, got %lu",
+                 g_img_protocol.max_packet_num + 1, packet_num);
+        // 不报错，继续处理，可能是有意跳过某些包
+    }
+
+    // 检查接收数据是否会超出缓冲区
+    if (g_img_protocol.received_size + payload_len > g_img_protocol.file_size) {
+        ESP_LOGE("ImgProtocol", "Data overflow: received %lu + payload %d > total %lu",
+                 g_img_protocol.received_size, payload_len, g_img_protocol.file_size);
+        g_img_protocol.transfer_error = true;
+        reset_protocol_state();
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // 流式写入数据到文件
+    if (payload_len > 0) {
+        uint32_t written;
+        lv_fs_res_t write_result = lv_fs_write(&g_img_protocol.file_handle, &data[8], payload_len, &written);
+
+        if (write_result != LV_FS_RES_OK || written != payload_len) {
+            ESP_LOGE("ImgProtocol", "File write failed: expected %d bytes, written %lu bytes, result: %d",
+                     payload_len, written, write_result);
+            g_img_protocol.transfer_error = true;
+            reset_protocol_state();
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        g_img_protocol.received_size += payload_len;
+        g_img_protocol.max_packet_num = packet_num;
+
+        ESP_LOGI("ImgProtocol", "Data packet %lu received, payload %d bytes, total %lu/%lu bytes (%.1f%%)",
+                 packet_num, payload_len, g_img_protocol.received_size, g_img_protocol.file_size,
+                 (g_img_protocol.received_size * 100.0) / g_img_protocol.file_size);
+    }
+
+    // 检查是否接收完成
+    if (g_img_protocol.received_size >= g_img_protocol.file_size) {
+        ESP_LOGI("ImgProtocol", "Transfer complete! File: %s, Total: %lu bytes",
+                 g_img_protocol.filename, g_img_protocol.file_size);
+
+        // 关闭文件
+        if (g_img_protocol.file_open) {
+            lv_fs_close(&g_img_protocol.file_handle);
+            g_img_protocol.file_open = false;
+            ESP_LOGI("ImgProtocol", "File closed successfully");
+        }
+
+        // 重置状态
+        g_img_protocol.state = PROTOCOL_STATE_IDLE;
+    }
+
+    return ESP_OK;
+}
+
+// 协议数据接收入口函数
+static void process_protocol_data(const uint8_t *data, uint16_t length) {
+    if (length == 0 || data == NULL) {
+        ESP_LOGW("ImgProtocol", "Empty data received");
+        return;
+    }
+
+    uint8_t cmd = data[0];
+
+    ESP_LOGI("ImgProtocol", "Processing protocol data - Cmd: 0x%02X, Length: %d", cmd, length);
+
+    switch (cmd) {
+        case CMD_INIT_FRAME:
+            // 收到新的0xD1命令，重置状态并开始新的传输
+            reset_protocol_state();
+            if (handle_init_frame(data, length) != ESP_OK) {
+                ESP_LOGE("ImgProtocol", "Failed to handle init frame");
+                reset_protocol_state();
+            }
+            break;
+
+        case CMD_DATA_FRAME:
+            // 处理数据帧
+            if (handle_data_frame(data, length) != ESP_OK) {
+                ESP_LOGE("ImgProtocol", "Failed to handle data frame");
+                if (g_img_protocol.transfer_error) {
+                    // 如果设置了错误标志，完全重置状态
+                    reset_protocol_state();
+                }
+            }
+            break;
+
+        default:
+            ESP_LOGW("ImgProtocol", "Unknown command: 0x%02X", cmd);
+            break;
+    }
 }
 
 
@@ -508,27 +819,10 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
     {
         ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_NUS_UART_RX_EVT, len=%d", param->nus_uart_rx.length);
         ESP_LOG_BUFFER_HEX("HIDevent", param->nus_uart_rx.data, param->nus_uart_rx.length);
-        // 协议解释：根据接收到的数据执行相应操作
-        // 示例：第一个字节是命令类型
-        if (param->nus_uart_rx.length >= 1) {
-            uint8_t cmd = param->nus_uart_rx.data[0];
-            ESP_LOGI("HIDevent", "NUS command: 0x%02X", cmd);
-            
-            // 根据命令类型处理数据
-            switch(cmd) {
-                case 0x01:  // 示例命令1
-                    ESP_LOGI("HIDevent", "Command 0x01 received");
-                    // 处理命令1
-                    break;
-                case 0x02:  // 示例命令2
-                    ESP_LOGI("HIDevent", "Command 0x02 received");
-                    // 处理命令2
-                    break;
-                default:
-                    ESP_LOGW("HIDevent", "Unknown command: 0x%02X", cmd);
-                    break;
-            }
-        }
+
+        // 调用图片传输协议处理函数
+        process_protocol_data(param->nus_uart_rx.data, param->nus_uart_rx.length);
+
         break;
     }
     default:
@@ -949,21 +1243,3 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
 
-
-// 将JPG数据写入文件系统
-void write_jpg_to_fs(const uint8_t *data, size_t length) {
-    lv_fs_file_t file;
-    if (lv_fs_open(&file, "A:/received.jpg", LV_FS_MODE_WR) != LV_FS_RES_OK) {
-        ESP_LOGE("FS", "无法打开文件进行写入");
-        return;
-    }
-
-    uint32_t written;
-    if (lv_fs_write(&file, data, length, &written) != LV_FS_RES_OK || written != length) {
-        ESP_LOGE("FS", "文件写入失败或不完整");
-    } else {
-        ESP_LOGI("FS", "文件写入成功，总字节数: %ld", written);
-    }
-
-    lv_fs_close(&file);
-}
