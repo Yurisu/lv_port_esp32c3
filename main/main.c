@@ -123,7 +123,7 @@ static esp_ble_adv_data_t hidd_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
     .include_txpower = true,
-    .min_interval = 0x40, // slave connection min interval, Time = min_interval * 1.25 msec
+    .min_interval = 0x10, // slave connection min interval, Time = min_interval * 1.25 msec
     .max_interval = 0x0320, // slave connection max interval, Time = max_interval * 1.25 msec
     .appearance = 0x03c1,   // 0x41, 鼠标    // 0x03c0,   HID Generic,
     .manufacturer_len = 0,
@@ -136,7 +136,7 @@ static esp_ble_adv_data_t hidd_adv_data = {
 };
 
 static esp_ble_adv_params_t hidd_adv_params = {
-    .adv_int_min = 0x40, //0.625,140=200ms
+    .adv_int_min = 0x10, //0.625,140=200ms
     .adv_int_max = 0x320, //640=1s,320=0.5s
     .adv_type = ADV_TYPE_IND,
     .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
@@ -782,7 +782,7 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         conn_params.latency = 0;
         conn_params.max_int = 0x100;//0x320;    // max_int = 0x20*1.25ms = 40ms
-        conn_params.min_int = 0x20;    // min_int = 0x10*1.25ms = 20ms
+        conn_params.min_int = 0x10;    // min_int = 0x10*1.25ms = 20ms
         conn_params.timeout = 900;    // timeout = 400*10ms = 4000ms
         esp_ble_gap_update_conn_params(&conn_params);
 
@@ -971,7 +971,7 @@ _Noreturn void app_main(void) {
     }
   }
   // while (1) {
-     vTaskDelay(pdMS_TO_TICKS(1000));
+     vTaskDelay(pdMS_TO_TICKS(100));
   // }
 
 
@@ -1089,14 +1089,14 @@ vTaskDelay(pdMS_TO_TICKS(100));
       {
           ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
       }
-vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(100));
 
       /// register the callback function to the gap module
       esp_ble_gap_register_callback(gap_event_handler);
       esp_hidd_register_callbacks(hidd_event_callback); // set name
 
       /* set the security iocap & auth_req & key size & init key response key parameters to the stack*/
-      esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND; // bonding with peer device after authentication
+      esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND; // bonding with peer device after authentication  ESP_LE_AUTH_NO_BOND
       esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;       // set the IO capability to No output No input
       uint8_t key_size = 16;                          // the key size should be 7~16 bytes
       uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;

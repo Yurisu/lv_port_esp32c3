@@ -1,0 +1,7 @@
+# BLE蓝牙连接工具依赖项
+
+# BLE跨平台库 (支持Windows/Linux/macOS)
+bleak>=0.21.0
+
+# 可选: 用于更详细的日志
+# bleak-winrt>=1.0.3  # Windows平台专用
