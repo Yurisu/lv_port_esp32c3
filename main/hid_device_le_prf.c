@@ -702,7 +702,7 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
 #endif
             if (param->write.handle == nus_rx_val_handle) {
                 ESP_LOGI(HID_LE_PRF_TAG, "FFE2recv: len=%d", param->write.len);
-                ESP_LOG_BUFFER_HEX(HID_LE_PRF_TAG, param->write.value, param->write.len);
+                //ESP_LOG_BUFFER_HEX(HID_LE_PRF_TAG, param->write.value, param->write.len);
                 // 触发NUS UART RX回调（直接传递param->write.value，无需复制）
                 if (hidd_le_env.hidd_cb != NULL) {
                     esp_hidd_cb_param_t cb_param = {0};
@@ -980,7 +980,7 @@ esp_err_t nus_uart_send_data(uint16_t conn_id, uint8_t *data, uint16_t len) {
     }
     // 检查NUS TX句柄是否已初始化
     if (nus_tx_val_handle == 0) {
-        //ESP_LOGE(HID_LE_PRF_TAG, "NUS TX handle not initialized");
+        ESP_LOGE(HID_LE_PRF_TAG, "NUS TX handle not initialized");
         return ESP_ERR_INVALID_STATE;
     }
     // 发送Notify数据

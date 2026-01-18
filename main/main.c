@@ -578,16 +578,7 @@ void hid_demo_task(void *pvParameters)
     {
         vTaskDelay(2000 / portTICK_PERIOD_MS);
         // 通过NUS发送数据到FFE1 (TX特征)
-            uint8_t nus_data[] = "Hello NUS!";
-            // 检查notify是否已启用
-            if (notifyEN()) {
-            esp_err_t ret = nus_uart_send_data(hid_conn_id, nus_data, strlen((char*)nus_data));
-                if (ret == ESP_OK) {
-                    ESP_LOGI("HIDtask", "NUS data sent successfully");
-                } else {
-                    ESP_LOGE("HIDtask", "NUS data send failed: %s", esp_err_to_name(ret));
-                }
-            }
+            
         if (sec_conn)
         {
             sec_conn=0;
@@ -933,6 +924,18 @@ vTaskDelay(pdMS_TO_TICKS(100));
     // 更新开机时间显示
     uptime_seconds++;
     if (time_label != NULL) {
+
+        uint8_t nus_data[15] = "";
+        sprintf((char*)nus_data, "Uptime: %lu", uptime_seconds);
+        // 检查notify是否已启用
+        if (notifyEN()) {
+        esp_err_t ret = nus_uart_send_data(hid_conn_id, nus_data, strlen((char*)nus_data));
+            if (ret == ESP_OK) {
+                ESP_LOGI("HIDtask", "NUS data sent successfully");
+            } else {
+                ESP_LOGE("HIDtask", "NUS data send failed: %s", esp_err_to_name(ret));
+            }
+        }
         lv_label_set_text_fmt(time_label, "Uptime: %lus", uptime_seconds);
     }
     lv_task_handler();
