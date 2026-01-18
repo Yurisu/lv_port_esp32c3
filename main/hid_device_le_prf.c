@@ -7,6 +7,7 @@
 #include "hidd_le_prf_int.h"
 #include <string.h>
 #include "esp_log.h"
+#include "esp_bt_defs.h"
 
 /// characteristic presentation information
 struct prf_char_pres_fmt
@@ -189,6 +190,40 @@ enum
 
     BAS_IDX_NB,
 };
+
+// Nordic UART Service UUID (NUS) - 16-bit UUID
+static const uint16_t NUS_SERVICE_UUID = 0x00FF;  // 自定义服务UUID
+static const uint16_t NUS_RX_CHAR_UUID = 0xFFE2;  // RX特征UUID
+static const uint16_t NUS_TX_CHAR_UUID = 0xFFE1;  // TX特征UUID
+
+// BLE UART服务属性索引（需保证索引不与现有服务冲突）
+enum {
+    NUS_IDX_SVC,                // UART服务声明
+    NUS_IDX_TX_CHAR,            // TX特征声明
+    NUS_IDX_TX_VAL,             // TX特征值（Notify）
+    NUS_IDX_TX_NTF_CFG,         // TX特征的CCC描述符（客户端配置）
+    NUS_IDX_RX_CHAR,            // RX特征声明
+    NUS_IDX_RX_VAL,             // RX特征值（Write）
+    NUS_IDX_NB,                 // UART服务属性总数
+};
+
+static uint16_t nus_att_tbl[NUS_IDX_NB] = {0};
+
+// UART TX/RX数据缓存大小（可根据需求调整）
+#define NUS_TX_MAX_LEN    20
+#define NUS_RX_MAX_LEN    20
+static uint8_t nus_tx_buf[NUS_TX_MAX_LEN] = {0};
+static uint8_t nus_rx_buf[NUS_RX_MAX_LEN] = {0};
+static uint16_t nus_tx_ccc = 0; // TX特征的CCC配置值（存储Notify使能状态）
+static uint16_t nus_tx_val_handle = 0;  // UART TX特征值句柄
+static uint16_t nus_rx_val_handle = 0;  // UART RX特征值句柄
+static bool nus_service_created = false;  // 标志NUS服务是否已创建
+static bool nus_notify_enabled = false;  // 标志NUS TX notify是否已启用
+
+
+
+
+
 
 #define HI_UINT16(a) (((a) >> 8) & 0xFF)
 #define LO_UINT16(a) ((a) & 0xFF)
@@ -533,6 +568,39 @@ static esp_gatts_attr_db_t hidd_le_gatt_db[HIDD_LE_IDX_NB] =
                                                                        hidReportRefFeature}},
 };
 
+// BLE UART(NUS)服务属性表
+static const esp_gatts_attr_db_t nus_att_db[NUS_IDX_NB] = {
+    // 1. UART服务声明
+    [NUS_IDX_SVC] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&primary_service_uuid,
+                                            ESP_GATT_PERM_READ,
+                                            sizeof(uint16_t), sizeof(NUS_SERVICE_UUID), (uint8_t *)&NUS_SERVICE_UUID}},
+
+    // 2. TX特征声明（Notify）
+    [NUS_IDX_TX_CHAR] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid,
+                                               ESP_GATT_PERM_READ,
+                                               CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_prop_notify}},
+
+    // 3. TX特征值（用于Notify发送数据）
+    [NUS_IDX_TX_VAL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&NUS_TX_CHAR_UUID,
+                                              ESP_GATT_PERM_READ,
+                                              NUS_TX_MAX_LEN, 0, nus_tx_buf}},
+
+    // 4. TX特征的CCC描述符（客户端配置Notify）
+    [NUS_IDX_TX_NTF_CFG] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
+                                                  ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                                                  sizeof(uint16_t), sizeof(nus_tx_ccc), (uint8_t *)&nus_tx_ccc}},
+
+    // 5. RX特征声明（Write Without Response）
+    [NUS_IDX_RX_CHAR] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid,
+                                               ESP_GATT_PERM_READ,
+                                               CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_prop_write_nr}},
+
+    // 6. RX特征值（用于接收主机写入的数据）
+    [NUS_IDX_RX_VAL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&NUS_RX_CHAR_UUID,
+                                              ESP_GATT_PERM_WRITE,
+                                              NUS_RX_MAX_LEN, 0, nus_rx_buf}},
+};
+
 static void hid_add_id_tbl(void);
 
 void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
@@ -588,6 +656,21 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         }
         case ESP_GATTS_CLOSE_EVT:
             break;
+        case ESP_GATTS_START_EVT: {
+            // HID服务启动完成后，创建NUS服务（仅创建一次）
+            if (param->start.service_handle == hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_SVC] && !nus_service_created) {
+                nus_service_created = true;
+                ESP_LOGI(HID_LE_PRF_TAG, "HID service started, creating NUS service");
+                esp_ble_gatts_create_attr_tab(nus_att_db, gatts_if, NUS_IDX_NB, 0);
+            }
+            break;
+        }
+        case ESP_GATTS_READ_EVT: {
+            if (param->read.handle == nus_tx_val_handle) {
+                ESP_LOGI(HID_LE_PRF_TAG, "FFE1 (TX characteristic) read by client");
+            }
+            break;
+        }
         case ESP_GATTS_WRITE_EVT: {
             esp_hidd_cb_param_t cb_param = {0};
             if (param->write.handle == hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_LED_OUT_VAL]) {
@@ -607,6 +690,22 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                 (hidd_le_env.hidd_cb)(ESP_HIDD_EVENT_BLE_VENDOR_REPORT_WRITE_EVT, &cb_param);
             }
 #endif
+            if (param->write.handle == nus_rx_val_handle) {
+                ESP_LOGI(HID_LE_PRF_TAG, "FFE2recv: len=%d, data=%s", param->write.len, param->write.value);
+                memcpy(nus_rx_buf, param->write.value, param->write.len);
+                // 2. 触发自定义回调（如向上层传递数据）
+                // 示例：if (hidd_le_env.hidd_cb) hidd_le_env.hidd_cb(ESP_HIDD_EVENT_UART_RX, &cb_param);
+            }
+            if (param->write.handle == nus_att_tbl[NUS_IDX_TX_NTF_CFG]) {
+                uint16_t ccc_value = (param->write.value[1] << 8) | param->write.value[0];
+                if (ccc_value == 0x0001) {
+                    nus_notify_enabled = true;
+                    ESP_LOGI(HID_LE_PRF_TAG, "NUS_TX_CHAR_UUID notify enabled by client");
+                } else if (ccc_value == 0x0000) {
+                    nus_notify_enabled = false;
+                    ESP_LOGI(HID_LE_PRF_TAG, "NUS_TX_CHAR_UUID notify disabled by client");
+                }
+            }
             break;
         }
         case ESP_GATTS_CREAT_ATTR_TAB_EVT: {
@@ -624,15 +723,25 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                 esp_ble_gatts_create_attr_tab(hidd_le_gatt_db, gatts_if, HIDD_LE_IDX_NB, 0);
             }
             if (param->add_attr_tab.num_handle == HIDD_LE_IDX_NB &&
+                param->add_attr_tab.svc_uuid.uuid.uuid16 == ATT_SVC_HID &&
                 param->add_attr_tab.status == ESP_GATT_OK) {
                 memcpy(hidd_le_env.hidd_inst.att_tbl, param->add_attr_tab.handles,
-                            HIDD_LE_IDX_NB*sizeof(uint16_t));
-                ESP_LOGI(HID_LE_PRF_TAG, "hid svc handle = %x",hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_SVC]);
+                            HIDD_LE_IDX_NB * sizeof(uint16_t));
+                ESP_LOGI(HID_LE_PRF_TAG, "HID service created, handle = 0x%04X", hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_SVC]);
                 hid_add_id_tbl();
-		        esp_ble_gatts_start_service(hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_SVC]);
-            } else {
-                esp_ble_gatts_start_service(param->add_attr_tab.handles[0]);
+                esp_ble_gatts_start_service(hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_SVC]);
             }
+            if (param->add_attr_tab.num_handle == NUS_IDX_NB &&
+                     param->add_attr_tab.svc_uuid.uuid.uuid16 == NUS_SERVICE_UUID &&
+                     param->add_attr_tab.status == ESP_GATT_OK) {
+                memcpy(nus_att_tbl, param->add_attr_tab.handles, NUS_IDX_NB * sizeof(uint16_t));
+                nus_tx_val_handle = nus_att_tbl[NUS_IDX_TX_VAL];
+                nus_rx_val_handle = nus_att_tbl[NUS_IDX_RX_VAL];
+                ESP_LOGI(HID_LE_PRF_TAG, "NUS service created, start handle: 0x%04X", param->add_attr_tab.handles[NUS_IDX_SVC]);
+                esp_ble_gatts_start_service(param->add_attr_tab.handles[NUS_IDX_SVC]);
+            }
+
+
             break;
          }
 
@@ -758,23 +867,6 @@ void hidd_get_attr_value(uint16_t handle, uint16_t *length, uint8_t **value)
 
     return;
 }
-void update_battery_level(uint8_t level) {
-    battary_lev = level; // 修改全局变量
-
-    // 触发属性更新（需知道特征句柄）
-    esp_ble_gatts_set_attr_value(
-        battery_level_handle, // 需从 hid_device_le_prf.c 中获取句柄
-        sizeof(battary_lev),
-        &battary_lev
-    );
-
-
-    // 读取电池电量值示例
-        // esp_ble_gatts_get_attr_value(battery_level_handle, &length, (const uint8_t **)&value);
-
-// 发送电量通知（如需）
-        // _gatts_send_indicate(gatts_if, conn_id, battery_level_handle, sizeof(level), &level, false);
-}
 static void hid_add_id_tbl(void)
 {
      // Mouse input report
@@ -840,3 +932,46 @@ static void hid_add_id_tbl(void)
   // Setup report ID map
   hid_dev_register_reports(HID_NUM_REPORTS, hid_rpt_map);
 }
+void update_battery_level(uint8_t level) {
+    battary_lev = level; // 修改全局变量
+
+    // 触发属性更新（需知道特征句柄）
+    esp_ble_gatts_set_attr_value(
+        battery_level_handle, // 需从 hid_device_le_prf.c 中获取句柄
+        sizeof(battary_lev),
+        &battary_lev
+    );
+
+
+    // 读取电池电量值示例
+        // esp_ble_gatts_get_attr_value(battery_level_handle, &length, (const uint8_t **)&value);
+
+// 发送电量通知（如需）
+        // _gatts_send_indicate(gatts_if, conn_id, battery_level_handle, sizeof(level), &level, false);
+}
+
+/**
+ * @brief 发送UART数据（TX特征Notify）
+ * @param conn_id 连接ID
+ * @param data 待发送数据
+ * @param len 数据长度（<= NUS_TX_MAX_LEN）
+ * @return esp_err_t 发送结果
+ */
+esp_err_t nus_uart_send_data(uint16_t conn_id, uint8_t *data, uint16_t len) {
+    if (len > NUS_TX_MAX_LEN || data == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    // 检查NUS TX句柄是否已初始化
+    if (nus_tx_val_handle == 0) {
+        ESP_LOGE(HID_LE_PRF_TAG, "NUS TX handle not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    // 检查notify是否已启用
+    if (!nus_notify_enabled) {
+        ESP_LOGW(HID_LE_PRF_TAG, "NUS TX notify is disabled, data not sent");
+        return ESP_ERR_INVALID_STATE;
+    }
+    // 发送Notify数据
+    return esp_ble_gatts_send_indicate(hidd_le_env.gatt_if, conn_id, nus_tx_val_handle, len, data, false);
+}
+

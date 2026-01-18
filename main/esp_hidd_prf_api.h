@@ -162,6 +162,18 @@ void esp_hidd_send_keyboard_value(uint16_t conn_id, key_mask_t special_key_mask,
 
 void esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mickeys_x, int8_t mickeys_y);
 
+/**
+ * @brief           Send UART data via NUS (Nordic UART Service)
+ *
+ * @param[in]    conn_id: connection ID
+ * @param[in]    data: pointer to data buffer
+ * @param[in]    len: data length (<= 20)
+ *
+ * @return         ESP_OK - success, other - failed
+ *
+ */
+esp_err_t nus_uart_send_data(uint16_t conn_id, uint8_t *data, uint16_t len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -18,6 +18,7 @@
 #include "esp_freertos_hooks.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
@@ -26,6 +27,7 @@
 #include "lvgl.h"
 #include "lvgl_helpers.h"
 #include "lv_port_fs.h"
+
 
 //bluetooth
 #include "esp_bt.h"
@@ -41,7 +43,6 @@
 #include "hidd_le_prf_int.h"
 #include "esp_hidd_prf_api.h"
 #include "hid_dev.h"
-#include "esp_task_wdt.h"
 #include "esp_hidd_api.h"
 // HID报告配置
 #define BATTERY_REPORT_ID 0x02
@@ -55,7 +56,6 @@ static bool sec_conn = false;
 static bool send_volum_up = false;
 #define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
 
-// #define HIDD_DEVICE_NAME            "HID"
 static uint8_t hidd_service_uuid128[] = {
     /* LSB <--------------------------------------------------------------------------------> MSB */
     // first uuid, 16bit, [12],[13] is the value
@@ -77,11 +77,13 @@ static uint8_t hidd_service_uuid128[] = {
     0x00,
 };
 
+
+
 static esp_ble_adv_data_t hidd_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
     .include_txpower = true,
-    .min_interval = 0x0140, // slave connection min interval, Time = min_interval * 1.25 msec
+    .min_interval = 0x40, // slave connection min interval, Time = min_interval * 1.25 msec
     .max_interval = 0x0320, // slave connection max interval, Time = max_interval * 1.25 msec
     .appearance = 0x03c1,   // 0x41, 鼠标    // 0x03c0,   HID Generic,
     .manufacturer_len = 0,
@@ -94,7 +96,7 @@ static esp_ble_adv_data_t hidd_adv_data = {
 };
 
 static esp_ble_adv_params_t hidd_adv_params = {
-    .adv_int_min = 0x140, //0.625,140=200ms
+    .adv_int_min = 0x40, //0.625,140=200ms
     .adv_int_max = 0x320, //640=1s,320=0.5s
     .adv_type = ADV_TYPE_IND,
     .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
@@ -485,9 +487,9 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         esp_ble_conn_update_params_t conn_params = {0};
         memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         conn_params.latency = 0;
-        conn_params.max_int = 0x320;    // max_int = 0x20*1.25ms = 40ms
-        conn_params.min_int = 0x70;    // min_int = 0x10*1.25ms = 20ms
-        conn_params.timeout = 1000;    // timeout = 400*10ms = 4000ms
+        conn_params.max_int = 0x100;//0x320;    // max_int = 0x20*1.25ms = 40ms
+        conn_params.min_int = 0x20;    // min_int = 0x10*1.25ms = 20ms
+        conn_params.timeout = 900;    // timeout = 400*10ms = 4000ms
         esp_ble_gap_update_conn_params(&conn_params);
 
         break;
@@ -551,6 +553,43 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 }
 
 
+void hid_demo_task(void *pvParameters)
+{
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    while (1)
+    {
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        // 通过NUS发送数据到FFE1 (TX特征)
+            uint8_t nus_data[] = "Hello NUS!";
+            esp_err_t ret = nus_uart_send_data(hid_conn_id, nus_data, strlen((char*)nus_data));
+            if (ret == ESP_OK) {
+                ESP_LOGI("HIDtask", "NUS data sent successfully");
+            } else {
+                ESP_LOGE("HIDtask", "NUS data send failed: %s", esp_err_to_name(ret));
+            }
+        if (sec_conn)
+        {
+            sec_conn=0;
+            ESP_LOGI("HIDtask", "Send the volume");
+            send_volum_up = true;
+            // uint8_t key_vaule = {HID_KEY_A};
+            // esp_hidd_send_keyboard_value(hid_conn_id, 0, &key_vaule, 1);
+            esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_UP, true);
+            
+            
+            
+            vTaskDelay(3000 / portTICK_PERIOD_MS);
+            if (send_volum_up)
+            {
+                send_volum_up = false;
+                esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_UP, false);
+                esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_DOWN, true);
+                vTaskDelay(3000 / portTICK_PERIOD_MS);
+                esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_DOWN, false);
+            }
+        }
+    }
+}
 
 
 
@@ -626,7 +665,7 @@ _Noreturn void app_main(void) {
     }
   }
   // while (1) {
-  //   vTaskDelay(pdMS_TO_TICKS(1000));
+     vTaskDelay(pdMS_TO_TICKS(1000));
   // }
 
 
@@ -701,6 +740,7 @@ _Noreturn void app_main(void) {
             }
         }
 
+vTaskDelay(pdMS_TO_TICKS(100));
 
 //BLE
   if(1)
@@ -743,6 +783,7 @@ _Noreturn void app_main(void) {
       {
           ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
       }
+vTaskDelay(pdMS_TO_TICKS(100));
 
       /// register the callback function to the gap module
       esp_ble_gap_register_callback(gap_event_handler);
@@ -764,7 +805,7 @@ _Noreturn void app_main(void) {
       esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
       esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 
-      // xTaskCreate(&hid_demo_task, "hid_task", 2048, NULL, 5, NULL);
+      xTaskCreate(&hid_demo_task, "hid_task", 4096, NULL, 5, NULL);
     }
 
 
@@ -772,6 +813,7 @@ _Noreturn void app_main(void) {
 
 
 
+     vTaskDelay(pdMS_TO_TICKS(1000));
 
 
 
@@ -780,7 +822,7 @@ _Noreturn void app_main(void) {
   /**
    * \brief Start LVGL demo.
    */
-  BG_EN(1);
+  //BG_EN(1);
   lv_init();
   lvgl_driver_init();
   lv_port_fs_init();
@@ -883,64 +925,41 @@ _Noreturn void app_main(void) {
 
 
 
+// #include "esp_vfs.h"
+// #include "esp_spiffs.h"
 
-/*
-void GC9A01_init(void)
-{
-	lcd_init_cmd_t GC_init_cmds[]={
-////////////////////////////////////////////
-		{0xEF, {0}, 0},
-		{0xEB, {0x14}, 1},
+// // 初始化SPIFFS文件系统
+// void init_fs() {
+//     esp_vfs_spiffs_conf_t conf = {
+//         .base_path = "/spiffs",
+//         .partition_label = NULL,
+//         .max_files = 5,
+//         .format_if_mount_failed = true
+//     };
 
-		{0xFE, {0}, 0},
-		{0xEF, {0}, 0},
+//     esp_err_t ret = esp_vfs_spiffs_register(&conf);
 
-		{0xB0, {0xC0}, 1},
-		{0x84, {0x40}, 1},
-		{0x85, {0xFF}, 1},
-		{0x86, {0xFF}, 1},
-		{0x87, {0xFF}, 1},
-		{0x88, {0x0A}, 1},
-		{0x89, {0x21}, 1},
-		{0x8A, {0x00}, 1},
-		{0x8B, {0x80}, 1},
-		{0x8C, {0x01}, 1},
-		{0x8D, {0x01}, 1},
-		{0x8E, {0xFF}, 1},
-		{0x8F, {0xFF}, 1},
-		{0xB6, {0x00, 0x20}, 2},
-		//call orientation
-		{0x3A, {0x05}, 1},
-		{0x90, {0x08, 0x08, 0X08, 0X08}, 4},
-		{0xBD, {0x06}, 1},
-		{0xBC, {0x00}, 1},
-		{0xFF, {0x60, 0x01, 0x04}, 3},
-		{0xC3, {0x13}, 1},
-		{0xC4, {0x13}, 1},
-		{0xC9, {0x22}, 1},
-		{0xBE, {0x11}, 1},
-		{0xE1, {0x10, 0x0E}, 2},
-		{0xDF, {0x21, 0x0C, 0x02}, 3},
-		{0xF0, {0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}, 6},
-		{0xF1, {0x43, 0x70, 0x72, 0x36, 0x37, 0x6F}, 6},
-		{0xF2, {0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}, 6},
-		{0xF3, {0x43, 0x70, 0x72, 0x36, 0x37, 0x6F}, 6},
-		{0xED, {0x1B, 0x0B}, 2},
-		{0xAE, {0x77}, 1},
-		{0xCD, {0x63}, 1},
-		{0x70, {0x07, 0x07, 0x04, 0x0E, 0x0F, 0x09, 0x07, 0X08, 0x03}, 9},
-		{0xE8, {0x34}, 1},
-		{0x62, {0x18, 0x0D, 0x71, 0xED, 0x70, 0x70, 0x18, 0X0F, 0x71, 0xEF, 0x70, 0x70}, 12},
-		{0x63, {0x18, 0x11, 0x71, 0xF1, 0x70, 0x70, 0x18, 0X13, 0x71, 0xF3, 0x70, 0x70}, 12},
-		{0x64, {0x28, 0x29, 0xF1, 0x01, 0xF1, 0x00, 0x07}, 7},
-		{0x66, {0x3C, 0x00, 0xCD, 0x67, 0x45, 0x45, 0x10, 0X00, 0x00, 0x00}, 10},
-		{0x67, {0x00, 0x3C, 0x00, 0x00, 0x00, 0x01, 0x54, 0X10, 0x32, 0x98}, 10},
-		{0x74, {0x10, 0x85, 0x80, 0x00, 0x00, 0x4E, 0x00}, 7},
-		{0x98, {0x3E, 0x07}, 2},
-		{0x35, {0}, 0},
-		{0x21, {0}, 0x80},
-		{0x11, {0}, 0x80},	//0x80 delay flag
-		{0x29, {0}, 0x80},	//0x80 delay flag
-		{0, {0}, 0xff},		//init end flag
-////////////////////////////////////////////
-*/
+//     if (ret != ESP_OK) {
+//         ESP_LOGE("FS", "SPIFFS初始化失败");
+//     } else {
+//         ESP_LOGI("FS", "SPIFFS初始化成功");
+//     }
+// }
+
+// 将JPG数据写入文件系统
+void write_jpg_to_fs(const uint8_t *data, size_t length) {
+    lv_fs_file_t file;
+    if (lv_fs_open(&file, "A:/received.jpg", LV_FS_MODE_WR) != LV_FS_RES_OK) {
+        ESP_LOGE("FS", "无法打开文件进行写入");
+        return;
+    }
+
+    uint32_t written;
+    if (lv_fs_write(&file, data, length, &written) != LV_FS_RES_OK || written != length) {
+        ESP_LOGE("FS", "文件写入失败或不完整");
+    } else {
+        ESP_LOGI("FS", "文件写入成功，总字节数: %ld", written);
+    }
+
+    lv_fs_close(&file);
+}
