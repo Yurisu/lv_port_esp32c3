@@ -121,7 +121,9 @@ class BLEConnectionManager:
         print("\n如果连接失败,请先:")
         print("  1. 打开Windows设置 → 设备 → 蓝牙")
         print("  2. 找到该设备并选择'移除'")
-
+        print("  3. 或者运行: python ble_unpair.py")
+        print("\n按Enter继续...")
+        input()
     
     def notification_handler(self, characteristic: BleakGATTCharacteristic, data: bytearray):
         """通知处理回调函数"""
@@ -170,8 +172,8 @@ class BLEConnectionManager:
                     continue
 
                 # 检查是否是HID设备(已配对)
-                #if attempt == 0:  # 只在第一次尝试时警告
-                #    self.check_paired_warning(device.name)
+                if attempt == 0:  # 只在第一次尝试时警告
+                    self.check_paired_warning(device.name)
 
                 # 保存设备信息
                 self.device = device
@@ -214,12 +216,9 @@ class BLEConnectionManager:
                 # Windows上可能需要手动触发服务发现
                 print("\n正在获取服务列表...")
                 try:
-                    # 访问 services 属性来触发服务发现
-                    services = self.client.services
-                    if services:
-                        print("✓ 服务列表获取成功")
-                    else:
-                        print("⚠ 服务列表为空，但连接已建立，继续尝试...")
+                    # 尝试获取服务，但如果超时就跳过
+                    await asyncio.wait_for(self.client.get_services(), timeout=15.0)
+                    print("✓ 服务列表获取成功")
                 except asyncio.TimeoutError:
                     print("⚠ 服务发现超时，但连接已建立，继续尝试...")
                 except Exception as e:
@@ -460,25 +459,14 @@ class BLEConnectionManager:
 async def main():
     """主函数"""
     import platform
-
-    # 检查命令行参数
-    if len(sys.argv) < 2:
-        print(f"\n用法: python ble_connect.py <设备地址>")
-        print(f"示例: python ble_connect.py {par_device_addr}")
-        print(f"\n默认设备地址: {par_device_addr}")
-        address = input(f"\n请输入设备地址 (直接回车使用默认): ").strip()
-        if not address:
-            address = par_device_addr
-    else:
-        address = sys.argv[1]
-
     system = platform.system()
 
     print(f"\n{'='*60}")
     print("BLE设备连接工具")
     print(f"{'='*60}")
     print(f"系统: {system}")
-    print(f"目标设备地址: {address}")
+    print(f"目标设备地址: {par_device_addr}")
+    print(f"NUS服务UUID: {par_nus_service}")
     print(f"TX特征UUID (接收数据): {par_tx_characteristic}")
     print(f"RX特征UUID (发送数据): {par_rx_characteristic}")
     print(f"连接超时: {CONNECTION_TIMEOUT}秒")
@@ -489,18 +477,60 @@ async def main():
         print("- BLE连接可能需要30-60秒")
         print("- 请确保Windows蓝牙适配器已启用")
         print("- 建议关闭其他蓝牙连接")
+        print("- 如果连接失败,可以尝试重新扫描后连接")
 
     manager = BLEConnectionManager()
 
-    # 直接连接
-    print(f"\n开始连接到设备: {address}")
-    success = await manager.connect_with_retry(address)
+    while True:
+        print(f"\n{'='*60}")
+        print("菜单")
+        print(f"{'='*60}")
+        print("1. 扫描附近设备")
+        print("2. 连接到目标设备 (自动重试)")
+        print("3. 连接到指定地址")
+        print("4. 断开连接")
+        print("5. 退出")
+        print(f"{'='*60}")
 
-    if success:
-        print("\n连接已完成")
-    else:
-        print("\n连接失败")
-        sys.exit(1)
+        choice = input("\n请选择操作 (1-5): ").strip()
+
+        if choice == "1":
+            # 扫描设备
+            devices = await manager.scan_devices(scan_duration=5.0)
+
+        elif choice == "2":
+            # 连接到目标设备
+            if manager.is_connected:
+                print("当前已连接到设备,请先断开!")
+                continue
+
+            print(f"\n开始连接到目标设备: {par_device_addr}")
+            await manager.connect_with_retry(par_device_addr)
+
+        elif choice == "3":
+            # 连接到指定地址
+            if manager.is_connected:
+                print("当前已连接到设备,请先断开!")
+                continue
+
+            address = input(f"\n请输入设备地址 (默认: {par_device_addr}): ").strip()
+            if not address:
+                address = par_device_addr
+
+            await manager.connect_with_retry(address)
+
+        elif choice == "4":
+            # 断开连接
+            await manager.disconnect()
+
+        elif choice == "5":
+            # 退出
+            await manager.disconnect()
+            print("\n退出程序!")
+            break
+
+        else:
+            print("无效的选择,请重新输入!")
 
 
 if __name__ == "__main__":
