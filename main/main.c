@@ -504,6 +504,33 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         ESP_LOG_BUFFER_HEX("HIDevent", param->led_write.data, param->led_write.length);
         break;
     }
+    case ESP_HIDD_EVENT_NUS_UART_RX_EVT:
+    {
+        ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_NUS_UART_RX_EVT, len=%d", param->nus_uart_rx.length);
+        ESP_LOG_BUFFER_HEX("HIDevent", param->nus_uart_rx.data, param->nus_uart_rx.length);
+        // 协议解释：根据接收到的数据执行相应操作
+        // 示例：第一个字节是命令类型
+        if (param->nus_uart_rx.length >= 1) {
+            uint8_t cmd = param->nus_uart_rx.data[0];
+            ESP_LOGI("HIDevent", "NUS command: 0x%02X", cmd);
+            
+            // 根据命令类型处理数据
+            switch(cmd) {
+                case 0x01:  // 示例命令1
+                    ESP_LOGI("HIDevent", "Command 0x01 received");
+                    // 处理命令1
+                    break;
+                case 0x02:  // 示例命令2
+                    ESP_LOGI("HIDevent", "Command 0x02 received");
+                    // 处理命令2
+                    break;
+                default:
+                    ESP_LOGW("HIDevent", "Unknown command: 0x%02X", cmd);
+                    break;
+            }
+        }
+        break;
+    }
     default:
         break;
     }
@@ -552,11 +579,14 @@ void hid_demo_task(void *pvParameters)
         vTaskDelay(2000 / portTICK_PERIOD_MS);
         // 通过NUS发送数据到FFE1 (TX特征)
             uint8_t nus_data[] = "Hello NUS!";
+            // 检查notify是否已启用
+            if (notifyEN()) {
             esp_err_t ret = nus_uart_send_data(hid_conn_id, nus_data, strlen((char*)nus_data));
-            if (ret == ESP_OK) {
-                ESP_LOGI("HIDtask", "NUS data sent successfully");
-            } else {
-                ESP_LOGE("HIDtask", "NUS data send failed: %s", esp_err_to_name(ret));
+                if (ret == ESP_OK) {
+                    ESP_LOGI("HIDtask", "NUS data sent successfully");
+                } else {
+                    ESP_LOGE("HIDtask", "NUS data send failed: %s", esp_err_to_name(ret));
+                }
             }
         if (sec_conn)
         {
@@ -916,26 +946,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
 
-// #include "esp_vfs.h"
-// #include "esp_spiffs.h"
-
-// // 初始化SPIFFS文件系统
-// void init_fs() {
-//     esp_vfs_spiffs_conf_t conf = {
-//         .base_path = "/spiffs",
-//         .partition_label = NULL,
-//         .max_files = 5,
-//         .format_if_mount_failed = true
-//     };
-
-//     esp_err_t ret = esp_vfs_spiffs_register(&conf);
-
-//     if (ret != ESP_OK) {
-//         ESP_LOGE("FS", "SPIFFS初始化失败");
-//     } else {
-//         ESP_LOGI("FS", "SPIFFS初始化成功");
-//     }
-// }
 
 // 将JPG数据写入文件系统
 void write_jpg_to_fs(const uint8_t *data, size_t length) {

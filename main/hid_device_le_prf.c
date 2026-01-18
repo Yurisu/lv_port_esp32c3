@@ -209,11 +209,9 @@ enum {
 
 static uint16_t nus_att_tbl[NUS_IDX_NB] = {0};
 
-// UART TX/RX数据缓存大小（可根据需求调整）
-#define NUS_TX_MAX_LEN    20
-#define NUS_RX_MAX_LEN    20
-static uint8_t nus_tx_buf[NUS_TX_MAX_LEN] = {0};
-static uint8_t nus_rx_buf[NUS_RX_MAX_LEN] = {0};
+// UART TX数据缓存大小（可根据需求调整）
+#define NUS_TX_MAX_LEN    465
+static uint16_t nus_tx_max_len = NUS_TX_MAX_LEN;  // 动态TX最大长度（根据MTU调整）
 static uint16_t nus_tx_ccc = 0; // TX特征的CCC配置值（存储Notify使能状态）
 static uint16_t nus_tx_val_handle = 0;  // UART TX特征值句柄
 static uint16_t nus_rx_val_handle = 0;  // UART RX特征值句柄
@@ -583,7 +581,7 @@ static const esp_gatts_attr_db_t nus_att_db[NUS_IDX_NB] = {
     // 3. TX特征值（用于Notify发送数据）
     [NUS_IDX_TX_VAL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&NUS_TX_CHAR_UUID,
                                               ESP_GATT_PERM_READ,
-                                              NUS_TX_MAX_LEN, 0, nus_tx_buf}},
+                                              NUS_TX_MAX_LEN, 0, NULL}},
 
     // 4. TX特征的CCC描述符（客户端配置Notify）
     [NUS_IDX_TX_NTF_CFG] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
@@ -598,7 +596,7 @@ static const esp_gatts_attr_db_t nus_att_db[NUS_IDX_NB] = {
     // 6. RX特征值（用于接收主机写入的数据）
     [NUS_IDX_RX_VAL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&NUS_RX_CHAR_UUID,
                                               ESP_GATT_PERM_WRITE,
-                                              NUS_RX_MAX_LEN, 0, nus_rx_buf}},
+                                              NUS_TX_MAX_LEN, 0, NULL}},
 };
 
 static void hid_add_id_tbl(void);
@@ -652,10 +650,22 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                     (hidd_le_env.hidd_cb)(ESP_HIDD_EVENT_BLE_DISCONNECT, NULL);
              }
             hidd_clcb_dealloc(param->disconnect.conn_id);
+            nus_notify_enabled = false;  // 断开连接时重置notify状态
             break;
         }
         case ESP_GATTS_CLOSE_EVT:
             break;
+        case ESP_GATTS_MTU_EVT: {
+            ESP_LOGI(HID_LE_PRF_TAG, "ESP_GATTS_MTU_EVT, MTU=%d", param->mtu.mtu);
+            // 根据协商的MTU动态调整NUS TX最大长度
+            // Notify数据包最大长度 = MTU - 3 (ATT头部: Opcode + Handle + Length)
+            nus_tx_max_len = param->mtu.mtu - 3;
+            if (nus_tx_max_len > NUS_TX_MAX_LEN) {
+                nus_tx_max_len = NUS_TX_MAX_LEN;  // 不超过硬编码的最大值
+            }
+            ESP_LOGI(HID_LE_PRF_TAG, "NUS TX max len updated to %d", nus_tx_max_len);
+            break;
+        }
         case ESP_GATTS_START_EVT: {
             // HID服务启动完成后，创建NUS服务（仅创建一次）
             if (param->start.service_handle == hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_SVC] && !nus_service_created) {
@@ -691,10 +701,16 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             }
 #endif
             if (param->write.handle == nus_rx_val_handle) {
-                ESP_LOGI(HID_LE_PRF_TAG, "FFE2recv: len=%d, data=%s", param->write.len, param->write.value);
-                memcpy(nus_rx_buf, param->write.value, param->write.len);
-                // 2. 触发自定义回调（如向上层传递数据）
-                // 示例：if (hidd_le_env.hidd_cb) hidd_le_env.hidd_cb(ESP_HIDD_EVENT_UART_RX, &cb_param);
+                ESP_LOGI(HID_LE_PRF_TAG, "FFE2recv: len=%d", param->write.len);
+                ESP_LOG_BUFFER_HEX(HID_LE_PRF_TAG, param->write.value, param->write.len);
+                // 触发NUS UART RX回调（直接传递param->write.value，无需复制）
+                if (hidd_le_env.hidd_cb != NULL) {
+                    esp_hidd_cb_param_t cb_param = {0};
+                    cb_param.nus_uart_rx.conn_id = param->write.conn_id;
+                    cb_param.nus_uart_rx.length = param->write.len;
+                    cb_param.nus_uart_rx.data = param->write.value;
+                    (hidd_le_env.hidd_cb)(ESP_HIDD_EVENT_NUS_UART_RX_EVT, &cb_param);
+                }
             }
             if (param->write.handle == nus_att_tbl[NUS_IDX_TX_NTF_CFG]) {
                 uint16_t ccc_value = (param->write.value[1] << 8) | param->write.value[0];
@@ -957,21 +973,25 @@ void update_battery_level(uint8_t level) {
  * @param len 数据长度（<= NUS_TX_MAX_LEN）
  * @return esp_err_t 发送结果
  */
+
 esp_err_t nus_uart_send_data(uint16_t conn_id, uint8_t *data, uint16_t len) {
-    if (len > NUS_TX_MAX_LEN || data == NULL) {
+    if (len > nus_tx_max_len || data == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     // 检查NUS TX句柄是否已初始化
     if (nus_tx_val_handle == 0) {
-        ESP_LOGE(HID_LE_PRF_TAG, "NUS TX handle not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-    // 检查notify是否已启用
-    if (!nus_notify_enabled) {
-        ESP_LOGW(HID_LE_PRF_TAG, "NUS TX notify is disabled, data not sent");
+        //ESP_LOGE(HID_LE_PRF_TAG, "NUS TX handle not initialized");
         return ESP_ERR_INVALID_STATE;
     }
     // 发送Notify数据
     return esp_ble_gatts_send_indicate(hidd_le_env.gatt_if, conn_id, nus_tx_val_handle, len, data, false);
 }
+
+bool notifyEN(void)
+{
+    return nus_notify_enabled;
+}
+
+
+
 
