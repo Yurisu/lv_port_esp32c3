@@ -36,6 +36,8 @@
 #include "esp_gatts_api.h"
 #include "esp_gatt_defs.h"
 #include "esp_bt_main.h"
+#include "esp_gattc_api.h"
+#include "esp_gatt_common_api.h" // Include for esp_ble_gatt_set_local_mtu
 #include "esp_mac.h" // 标准MAC API
 #include "esp_bt_device.h"
 
@@ -56,26 +58,7 @@ static bool sec_conn = false;
 static bool send_volum_up = false;
 #define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
 
-static uint8_t hidd_service_uuid128[] = {
-    /* LSB <--------------------------------------------------------------------------------> MSB */
-    // first uuid, 16bit, [12],[13] is the value
-    0xfb,
-    0x34,
-    0x9b,
-    0x5f,
-    0x80,
-    0x00,
-    0x00,
-    0x80,
-    0x00,
-    0x10,
-    0x00,
-    0x00,
-    0x12,
-    0x18,
-    0x00,
-    0x00,
-};
+
 
 
 
@@ -491,6 +474,14 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         conn_params.min_int = 0x20;    // min_int = 0x10*1.25ms = 20ms
         conn_params.timeout = 900;    // timeout = 400*10ms = 4000ms
         esp_ble_gap_update_conn_params(&conn_params);
+
+        // 设置MTU为470
+        esp_err_t mtu_ret = esp_ble_gatt_set_local_mtu(470);
+        if (mtu_ret == ESP_OK) {
+            ESP_LOGI("HIDevent", "MTU set to 470");
+        } else {
+            ESP_LOGE("HIDevent", "Failed to set MTU: %s", esp_err_to_name(mtu_ret));
+        }
 
         break;
     }
