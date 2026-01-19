@@ -44,6 +44,7 @@
 // 图片传输协议相关定义
 #define CMD_INIT_FRAME          0xD1  // 初始化帧
 #define CMD_DATA_FRAME          0xD2  // 数据帧
+#define CMD_RESET_FRAME          0xEE  // 数据帧
 #define MAX_FILENAME_LEN        64
 #define MAX_FILE_SIZE           1024 * 1024  // 最大1MB
 
@@ -65,23 +66,6 @@ typedef struct {
     uint32_t max_packet_num;        // 最大接收包号（用于去重）
     bool transfer_error;            // 传输错误标志
 } image_transfer_protocol_t;
-
-//hid
-#include "hidd_le_prf_int.h"
-#include "esp_hidd_prf_api.h"
-#include "hid_dev.h"
-#include "esp_hidd_api.h"
-// HID报告配置
-#define BATTERY_REPORT_ID 0x02
-#define BATTERY_REPORT_SIZE 1
-#define HIDD_DEVICE_NAME      "VSchess-"
-char blerename[32];
-uint8_t macAddr[6]; //蓝牙地址
-
-static uint16_t hid_conn_id = 0;
-static bool sec_conn = false;
-static bool send_volum_up = false;
-#define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
 
 // 图片传输协议全局变量
 static image_transfer_protocol_t g_img_protocol = {
@@ -109,15 +93,29 @@ static uint32_t be_to_u32(const uint8_t *data) {
            ((uint32_t)data[2] << 8) |
            (uint32_t)data[3];
 }
-
 // 大端序转uint16_t
 static uint16_t be_to_u16(const uint8_t *data) {
     return ((uint16_t)data[0] << 8) | (uint16_t)data[1];
 }
+//数据处理函数
+static void process_protocol_data(const uint8_t *data, uint16_t length);
 
+//hid
+#include "hidd_le_prf_int.h"
+#include "esp_hidd_prf_api.h"
+#include "hid_dev.h"
+#include "esp_hidd_api.h"
+// HID报告配置
+#define BATTERY_REPORT_ID 0x02
+#define BATTERY_REPORT_SIZE 1
+#define HIDD_DEVICE_NAME      "VSchess-"
+char blerename[32];
+uint8_t macAddr[6]; //蓝牙地址
 
-
-
+static uint16_t hid_conn_id = 0;
+static bool sec_conn = false;
+static bool send_volum_up = false;
+#define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
 
 static esp_ble_adv_data_t hidd_adv_data = {
     .set_scan_rsp = false,
@@ -499,22 +497,22 @@ static void reset_protocol_state(void) {
     if (g_img_protocol.file_open) {
         lv_fs_close(&g_img_protocol.file_handle);
         g_img_protocol.file_open = false;
-        ESP_LOGI("ImgProtocol", "File closed");
+        ESP_LOGI("CMDp", "File closed");
     }
     memset(&g_img_protocol, 0, sizeof(image_transfer_protocol_t));
     g_img_protocol.state = PROTOCOL_STATE_IDLE;
     g_img_protocol.max_packet_num = 0;
-    ESP_LOGI("ImgProtocol", "Protocol state reset");
+    ESP_LOGI("CMDp", "Protocol state reset");
 }
 
 // 处理初始化帧（0xD1命令）
 // 帧结构：命令(1) | checksum(2) | 文件大小(4) | 长度(1) | 文件名(N)
 static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
-    ESP_LOGI("ImgProtocol", "Handling init frame, length=%d", length);
+    ESP_LOGI("CMDp", "Handling init frame, length=%d", length);
 
     // 最小帧长度：命令(1) + checksum(2) + 文件大小(4) + 长度(1) + 文件名(1) = 9字节
     if (length < 9) {
-        ESP_LOGE("ImgProtocol", "Init frame too short: %d < 9", length);
+        ESP_LOGE("CMDp", "Init frame too short: %d < 9", length);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -525,27 +523,27 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
 
     // 检查命令是否为0xD1
     if (cmd != CMD_INIT_FRAME) {
-        ESP_LOGE("ImgProtocol", "Invalid init frame command: 0x%02X", cmd);
+        ESP_LOGE("CMDp", "Invalid init frame command: 0x%02X", cmd);
         return ESP_ERR_INVALID_ARG;
     }
 
     // 检查文件名长度是否合法
     if (filename_len == 0 || filename_len >= MAX_FILENAME_LEN) {
-        ESP_LOGE("ImgProtocol", "Invalid filename length: %d", filename_len);
+        ESP_LOGE("CMDp", "Invalid filename length: %d", filename_len);
         return ESP_ERR_INVALID_ARG;
     }
 
     // 检查总长度是否匹配
     uint16_t expected_length = 1 + 2 + 4 + 1 + filename_len; // 命令 + checksum + 文件大小 + 长度 + 文件名
     if (length != expected_length) {
-        ESP_LOGE("ImgProtocol", "Length mismatch: expected %d, got %d", expected_length, length);
+        ESP_LOGE("CMDp", "Length mismatch: expected %d, got %d", expected_length, length);
         return ESP_ERR_INVALID_SIZE;
     }
 
     // 验证checksum（校验数据：文件大小+长度+文件名）
     uint16_t calc_checksum = checksum16(&data[3], length - 3); // 从文件大小字段开始校验
     if (received_checksum != calc_checksum) {
-        ESP_LOGE("ImgProtocol", "Checksum error: received=0x%04X, calculated=0x%04X",
+        ESP_LOGE("CMDp", "Checksum error: received=0x%04X, calculated=0x%04X",
                  received_checksum, calc_checksum);
         g_img_protocol.transfer_error = true;
         return ESP_ERR_INVALID_CRC;
@@ -553,7 +551,7 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
 
     // 检查文件大小是否合理
     if (file_size == 0 || file_size > MAX_FILE_SIZE) {
-        ESP_LOGE("ImgProtocol", "Invalid file size: %lu", file_size);
+        ESP_LOGE("CMDp", "Invalid file size: %lu", file_size);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -562,7 +560,7 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
     memcpy(g_img_protocol.filename, &data[8], filename_len);
     g_img_protocol.filename[filename_len] = '\0';
 
-    ESP_LOGI("ImgProtocol", "Init frame valid - File: %s, Size: %lu bytes",
+    ESP_LOGI("CMDp", "Init frame valid - File: %s, Size: %lu bytes",
              g_img_protocol.filename, file_size);
 
     // 重置之前的传输状态
@@ -577,7 +575,7 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
 
     // 打开文件准备写入
     if (lv_fs_open(&g_img_protocol.file_handle, filepath, LV_FS_MODE_WR) != LV_FS_RES_OK) {
-        ESP_LOGE("ImgProtocol", "Failed to open file: %s", filepath);
+        ESP_LOGE("CMDp", "Failed to open file: %s", filepath);
         reset_protocol_state();
         g_img_protocol.transfer_error = true;
         return ESP_ERR_INVALID_STATE;
@@ -591,7 +589,7 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
     g_img_protocol.transfer_error = false;
     g_img_protocol.state = PROTOCOL_STATE_RECEIVING_DATA;
 
-    ESP_LOGI("ImgProtocol", "File opened for writing - Path: %s, Total size: %lu bytes", filepath, file_size);
+    ESP_LOGI("CMDp", "File opened for writing - Path: %s, Total size: %lu bytes", filepath, file_size);
 
     return ESP_OK;
 }
@@ -599,23 +597,23 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
 // 处理数据帧（0xD2命令）
 // 帧结构：命令(1) | checksum(2) | 包号(4) | 长度(1) | 数据负载(N)
 static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
-    ESP_LOGI("ImgProtocol", "Handling data frame, length=%d", length);
+    ESP_LOGI("CMDp", "Handling data frame, length=%d", length);
 
     // 如果之前有错误，拒绝接收数据帧
     if (g_img_protocol.transfer_error) {
-        ESP_LOGW("ImgProtocol", "Transfer error flag set, ignoring data frame");
+        ESP_LOGW("CMDp", "Transfer error flag set, ignoring data frame");
         return ESP_ERR_INVALID_STATE;
     }
 
     // 检查是否处于接收数据状态
     if (g_img_protocol.state != PROTOCOL_STATE_RECEIVING_DATA) {
-        ESP_LOGW("ImgProtocol", "Not in receiving data state, ignoring frame");
+        ESP_LOGW("CMDp", "Not in receiving data state, ignoring frame");
         return ESP_ERR_INVALID_STATE;
     }
 
     // 最小帧长度：命令(1) + checksum(2) + 包号(4) + 长度(1) = 8字节
     if (length < 8) {
-        ESP_LOGE("ImgProtocol", "Data frame too short: %d < 8", length);
+        ESP_LOGE("CMDp", "Data frame too short: %d < 8", length);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -626,21 +624,21 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
 
     // 检查命令是否为0xD2
     if (cmd != CMD_DATA_FRAME) {
-        ESP_LOGE("ImgProtocol", "Invalid data frame command: 0x%02X", cmd);
+        ESP_LOGE("CMDp", "Invalid data frame command: 0x%02X", cmd);
         return ESP_ERR_INVALID_ARG;
     }
 
     // 检查总长度是否匹配
     uint16_t expected_length = 1 + 2 + 4 + 1 + payload_len; // 命令 + checksum + 包号 + 长度 + 负载
     if (length != expected_length) {
-        ESP_LOGE("ImgProtocol", "Length mismatch: expected %d, got %d", expected_length, length);
+        ESP_LOGE("CMDp", "Length mismatch: expected %d, got %d", expected_length, length);
         return ESP_ERR_INVALID_SIZE;
     }
 
     // 验证checksum（校验数据：包号+长度+负载）
     uint16_t calc_checksum = checksum16(&data[3], length - 3); // 从包号字段开始校验
     if (received_checksum != calc_checksum) {
-        ESP_LOGE("ImgProtocol", "Checksum error: received=0x%04X, calculated=0x%04X",
+        ESP_LOGE("CMDp", "Checksum error: received=0x%04X, calculated=0x%04X",
                  received_checksum, calc_checksum);
         g_img_protocol.transfer_error = true;
         reset_protocol_state();
@@ -649,21 +647,21 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
 
     // 检查包号是否重复（去重）
     if (packet_num <= g_img_protocol.max_packet_num) {
-        ESP_LOGW("ImgProtocol", "Duplicate packet: %lu (max=%lu), dropping",
+        ESP_LOGW("CMDp", "Duplicate packet: %lu (max=%lu), dropping",
                  packet_num, g_img_protocol.max_packet_num);
         return ESP_OK; // 重复包不算错误，只是丢弃
     }
 
     // 检查是否有跳包
     if (packet_num != g_img_protocol.max_packet_num + 1 && g_img_protocol.max_packet_num != 0) {
-        ESP_LOGW("ImgProtocol", "Packet gap detected: expected %lu, got %lu",
+        ESP_LOGW("CMDp", "Packet gap detected: expected %lu, got %lu",
                  g_img_protocol.max_packet_num + 1, packet_num);
         // 不报错，继续处理，可能是有意跳过某些包
     }
 
     // 检查接收数据是否会超出缓冲区
     if (g_img_protocol.received_size + payload_len > g_img_protocol.file_size) {
-        ESP_LOGE("ImgProtocol", "Data overflow: received %lu + payload %d > total %lu",
+        ESP_LOGE("CMDp", "Data overflow: received %lu + payload %d > total %lu",
                  g_img_protocol.received_size, payload_len, g_img_protocol.file_size);
         g_img_protocol.transfer_error = true;
         reset_protocol_state();
@@ -676,7 +674,7 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
         lv_fs_res_t write_result = lv_fs_write(&g_img_protocol.file_handle, &data[8], payload_len, &written);
 
         if (write_result != LV_FS_RES_OK || written != payload_len) {
-            ESP_LOGE("ImgProtocol", "File write failed: expected %d bytes, written %lu bytes, result: %d",
+            ESP_LOGE("CMDp", "File write failed: expected %d bytes, written %lu bytes, result: %d",
                      payload_len, written, write_result);
             g_img_protocol.transfer_error = true;
             reset_protocol_state();
@@ -686,21 +684,21 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
         g_img_protocol.received_size += payload_len;
         g_img_protocol.max_packet_num = packet_num;
 
-        ESP_LOGI("ImgProtocol", "Data packet %lu received, payload %d bytes, total %lu/%lu bytes (%.1f%%)",
+        ESP_LOGI("CMDp", "Data packet %lu received, payload %d bytes, total %lu/%lu bytes (%.1f%%)",
                  packet_num, payload_len, g_img_protocol.received_size, g_img_protocol.file_size,
                  (g_img_protocol.received_size * 100.0) / g_img_protocol.file_size);
     }
 
     // 检查是否接收完成
     if (g_img_protocol.received_size >= g_img_protocol.file_size) {
-        ESP_LOGI("ImgProtocol", "Transfer complete! File: %s, Total: %lu bytes",
+        ESP_LOGI("CMDp", "Transfer complete! File: %s, Total: %lu bytes",
                  g_img_protocol.filename, g_img_protocol.file_size);
 
         // 关闭文件
         if (g_img_protocol.file_open) {
             lv_fs_close(&g_img_protocol.file_handle);
             g_img_protocol.file_open = false;
-            ESP_LOGI("ImgProtocol", "File closed successfully");
+            ESP_LOGI("CMDp", "File closed successfully");
         }
 
         // 重置状态
@@ -709,45 +707,6 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
 
     return ESP_OK;
 }
-
-// 协议数据接收入口函数
-static void process_protocol_data(const uint8_t *data, uint16_t length) {
-    if (length == 0 || data == NULL) {
-        ESP_LOGW("ImgProtocol", "Empty data received");
-        return;
-    }
-
-    uint8_t cmd = data[0];
-
-    ESP_LOGI("ImgProtocol", "Processing protocol data - Cmd: 0x%02X, Length: %d", cmd, length);
-
-    switch (cmd) {
-        case CMD_INIT_FRAME:
-            // 收到新的0xD1命令，重置状态并开始新的传输
-            reset_protocol_state();
-            if (handle_init_frame(data, length) != ESP_OK) {
-                ESP_LOGE("ImgProtocol", "Failed to handle init frame");
-                reset_protocol_state();
-            }
-            break;
-
-        case CMD_DATA_FRAME:
-            // 处理数据帧
-            if (handle_data_frame(data, length) != ESP_OK) {
-                ESP_LOGE("ImgProtocol", "Failed to handle data frame");
-                if (g_img_protocol.transfer_error) {
-                    // 如果设置了错误标志，完全重置状态
-                    reset_protocol_state();
-                }
-            }
-            break;
-
-        default:
-            ESP_LOGW("ImgProtocol", "Unknown command: 0x%02X", cmd);
-            break;
-    }
-}
-
 
 
 
@@ -776,17 +735,12 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
     {
         ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_BLE_CONNECT");
         hid_conn_id = param->connect.conn_id;
+        sec_conn = true;
 
+        // 等待连接稳定后再更新参数
+        vTaskDelay(pdMS_TO_TICKS(200));
 
-        esp_ble_conn_update_params_t conn_params = {0};
-        memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
-        conn_params.latency = 0;
-        conn_params.max_int = 0x100;//0x320;    // max_int = 0x20*1.25ms = 40ms
-        conn_params.min_int = 0x10;    // min_int = 0x10*1.25ms = 20ms
-        conn_params.timeout = 900;    // timeout = 400*10ms = 4000ms
-        esp_ble_gap_update_conn_params(&conn_params);
-
-        // 设置MTU为470
+        // 先设置MTU为470
         esp_err_t mtu_ret = esp_ble_gatt_set_local_mtu(470);
         if (mtu_ret == ESP_OK) {
             ESP_LOGI("HIDevent", "MTU set to 470");
@@ -794,12 +748,31 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
             ESP_LOGE("HIDevent", "Failed to set MTU: %s", esp_err_to_name(mtu_ret));
         }
 
+        // 检查连接是否仍然有效
+        if (hid_conn_id != 0) {
+            esp_ble_conn_update_params_t conn_params = {0};
+            memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+            conn_params.latency = 0;
+            conn_params.max_int = 0x20;    // max_int = 0x20*1.25ms = 40ms
+            conn_params.min_int = 0x10;    // min_int = 0x10*1.25ms = 20ms
+            conn_params.timeout = 500;     // timeout = 500*10ms = 5000ms
+            esp_err_t ret = esp_ble_gap_update_conn_params(&conn_params);
+            if (ret != ESP_OK) {
+                ESP_LOGE("HIDevent", "Failed to update conn params: %s", esp_err_to_name(ret));
+            } else {
+                ESP_LOGI("HIDevent", "Connection parameters updated");
+            }
+        }
+
         break;
     }
     case ESP_HIDD_EVENT_BLE_DISCONNECT:
     {
         sec_conn = false;
+        hid_conn_id = 0;
         ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_BLE_DISCONNECT");
+        // 等待断开完全完成后重新广播
+        vTaskDelay(pdMS_TO_TICKS(100));
         esp_ble_gap_start_advertising(&hidd_adv_params);
         break;
     }
@@ -864,6 +837,52 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
+
+
+// 协议数据接收入口函数
+static void process_protocol_data(const uint8_t *data, uint16_t length) {
+    if (length == 0 || data == NULL) {
+        ESP_LOGW("CMDp", "Empty data received");
+        return;
+    }
+
+    uint8_t cmd = data[0];
+
+    ESP_LOGI("CMDp", "Processing protocol data - Cmd: 0x%02X, Length: %d", cmd, length);
+
+    switch (cmd) {
+        //0xD1
+        case CMD_INIT_FRAME:
+            // 收到新的0xD1命令，重置状态并开始新的传输
+            reset_protocol_state();
+            if (handle_init_frame(data, length) != ESP_OK) {
+                ESP_LOGE("CMDp", "Failed to handle init frame");
+                reset_protocol_state();
+            }
+            break;
+        //0xD2
+        case CMD_DATA_FRAME:
+            // 处理数据帧
+            if (handle_data_frame(data, length) != ESP_OK) {
+                ESP_LOGE("CMDp", "Failed to handle data frame");
+                if (g_img_protocol.transfer_error) {
+                    // 如果设置了错误标志，完全重置状态
+                    reset_protocol_state();
+                }
+            }
+            break;
+        //0xEE
+        case CMD_RESET_FRAME:
+            // 重启mcu
+            ESP_LOGI("CMDp", "Resetting MCU");
+            esp_restart();
+            break;
+
+        default:
+            ESP_LOGW("CMDp", "Unknown command: 0x%02X", cmd);
+            break;
+    }
+}
 
 void hid_demo_task(void *pvParameters)
 {

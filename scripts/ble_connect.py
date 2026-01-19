@@ -29,11 +29,12 @@ RETRY_DELAY = 2.0  # 重试延迟(秒)
 
 class BLEConnectionManager:
     """BLE连接管理器"""
-    
+
     def __init__(self):
         self.client = None
         self.device = None
         self.is_connected = False
+        self.rx_characteristic = None  # FFE2 - 用于发送数据
         
     async def scan_devices(self, scan_duration=5.0):
         """
@@ -140,12 +141,13 @@ class BLEConnectionManager:
         print(f"\n[断开连接] 设备已断开")
         self.is_connected = False
     
-    async def connect_with_retry(self, address, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
+    async def connect_for_mode(self, address, mode, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
         """
-        带重试机制的设备连接
-        
+        带重试机制的设备连接，根据模式配置特征
+
         Args:
             address: 设备MAC地址
+            mode: 工作模式 (1=接收, 2=发送)
             max_retries: 最大重试次数
             retry_delay: 重试延迟(秒)
         """
@@ -153,7 +155,7 @@ class BLEConnectionManager:
             print(f"\n{'='*60}")
             print(f"连接尝试 {attempt + 1}/{max_retries}")
             print(f"{'='*60}")
-            
+
             try:
                 # 查找设备
                 device = await self.find_device_by_address(address, timeout=10.0)
@@ -169,10 +171,6 @@ class BLEConnectionManager:
                         await asyncio.sleep(retry_delay)
                     continue
 
-                # 检查是否是HID设备(已配对)
-                #if attempt == 0:  # 只在第一次尝试时警告
-                #    self.check_paired_warning(device.name)
-
                 # 保存设备信息
                 self.device = device
 
@@ -183,9 +181,7 @@ class BLEConnectionManager:
                 print(f"\n正在连接到设备...")
                 print("提示: Windows上BLE连接可能需要较长时间(30-60秒),请耐心等待...")
 
-                # 尝试不同的连接策略
                 try:
-                    # Windows上可能需要禁用MTU协商来加快连接速度
                     self.client = BleakClient(
                         device,
                         disconnected_callback=lambda client: self.disconnected_callback(client),
@@ -214,7 +210,6 @@ class BLEConnectionManager:
                 # Windows上可能需要手动触发服务发现
                 print("\n正在获取服务列表...")
                 try:
-                    # 访问 services 属性来触发服务发现
                     services = self.client.services
                     if services:
                         print("✓ 服务列表获取成功")
@@ -224,84 +219,147 @@ class BLEConnectionManager:
                     print("⚠ 服务发现超时，但连接已建立，继续尝试...")
                 except Exception as e:
                     print(f"⚠ 服务发现警告: {e}，继续尝试...")
-                
+
                 # 列出服务
                 await self.list_services()
 
-                # 配置NUS服务并启用TX特征通知
-                success = await self.enable_ffe2_notification()
+                # 根据模式配置特征
+                if mode == '1':
+                    # 接收模式：启用FFE1通知
+                    success = await self.enable_ffe2_notification()
+                    if success:
+                        # 保持连接,等待断开
+                        print(f"\n连接已建立,正在监听设备...")
+                        print(f"按 Ctrl+C 断开连接\n")
 
-                if success:
-                    # 保持连接,等待断开
-                    print(f"\n连接已建立,正在监听设备...")
-                    print(f"按 Ctrl+C 断开连接\n")
-                    
-                    try:
-                        await disconnected_event.wait()
-                    except KeyboardInterrupt:
-                        print("\n用户中断连接...")
-                    
-                    # 断开连接
-                    await self.disconnect()
-                    
+                        try:
+                            await disconnected_event.wait()
+                        except KeyboardInterrupt:
+                            print("\n用户中断连接...")
+                elif mode == '2':
+                    # 发送模式：配置FFE2但不启用通知
+                    success = await self.configure_rx_characteristic()
+
                 return True
-                
+
             except BleakError as e:
                 print(f"✗ BLE连接错误: {e}")
                 self.is_connected = False
-                
-                # 断开可能的部分连接
+
                 if self.client and self.client.is_connected:
                     try:
                         await self.client.disconnect()
                     except:
                         pass
-                
+
                 if attempt < max_retries - 1:
                     print(f"{retry_delay}秒后重试...")
                     await asyncio.sleep(retry_delay)
                 else:
                     print(f"\n已达到最大重试次数 ({max_retries}), 连接失败")
                     return False
-                    
+
             except asyncio.TimeoutError:
                 print(f"✗ 操作超时")
                 self.is_connected = False
-                
+
                 if self.client and self.client.is_connected:
                     try:
                         await self.client.disconnect()
                     except:
                         pass
-                
+
                 if attempt < max_retries - 1:
                     print(f"{retry_delay}秒后重试...")
                     await asyncio.sleep(retry_delay)
                 else:
                     print(f"\n已达到最大重试次数 ({max_retries}), 连接失败")
                     return False
-                    
+
             except Exception as e:
                 print(f"✗ 发生未预期的错误: {e}")
                 import traceback
                 traceback.print_exc()
                 self.is_connected = False
-                
+
                 if self.client and self.client.is_connected:
                     try:
                         await self.client.disconnect()
                     except:
                         pass
-                
+
                 if attempt < max_retries - 1:
                     print(f"{retry_delay}秒后重试...")
                     await asyncio.sleep(retry_delay)
                 else:
                     print(f"\n已达到最大重试次数 ({max_retries}), 连接失败")
                     return False
-        
+
         return False
-    
+
+    async def configure_rx_characteristic(self):
+        """配置RX特征(FFE2)用于发送数据"""
+        print(f"\n{'='*60}")
+        print("配置RX特征(FFE2)")
+        print(f"{'='*60}")
+
+        try:
+            # 直接在所有服务中查找FFE1(TX)和FFE2(RX)特征
+            tx_characteristic = None
+            rx_characteristic = None
+
+            print(f"正在查找FFE1(TX)和FFE2(RX)特征...")
+
+            for service in self.client.services:
+                for char in service.characteristics:
+                    if par_tx_characteristic in char.uuid:
+                        tx_characteristic = char
+                        print(f"  ✓ 找到TX特征 (FFE1): {char.uuid}")
+
+                    if par_rx_characteristic in char.uuid:
+                        rx_characteristic = char
+                        self.rx_characteristic = char
+                        print(f"  ✓ 找到RX特征 (FFE2): {char.uuid}")
+                        print(f"    所属服务: {service.uuid}")
+
+            if not rx_characteristic:
+                print(f"\n✗ 未找到RX特征 ({par_rx_characteristic}) - 无法发送数据!")
+                return False
+
+            # 检查RX特征是否支持写入
+            print(f"\n检查RX特征属性...")
+            properties = []
+            supports_write = False
+
+            try:
+                if hasattr(rx_characteristic, 'properties'):
+                    char_props = rx_characteristic.properties
+                    props_str = str(char_props)
+                    if 'write' in props_str:
+                        properties.append("写")
+                        supports_write = True
+                    if 'write-without-response' in props_str:
+                        properties.append("写(无响应)")
+                        supports_write = True
+            except:
+                pass
+
+            props_str = "/".join(properties) if properties else "未知"
+            print(f"  RX特征支持: {props_str}")
+
+            if supports_write:
+                print(f"\n✓ RX特征已就绪，可以发送数据!")
+                return True
+            else:
+                print(f"✗ RX特征不支持写入操作")
+                return False
+
+        except Exception as e:
+            print(f"✗ 配置RX特征失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     async def list_services(self):
         """列出设备提供的所有服务"""
         print(f"\n{'='*60}")
@@ -376,6 +434,7 @@ class BLEConnectionManager:
 
                     if par_rx_characteristic in char.uuid:
                         rx_characteristic = char
+                        self.rx_characteristic = char  # 保存RX特征引用
                         print(f"  ✓ 找到RX特征 (FFE2): {char.uuid}")
                         print(f"    所属服务: {service.uuid}")
 
@@ -437,22 +496,53 @@ class BLEConnectionManager:
 
         return False
     
+    async def send_data(self, data: bytearray):
+        """
+        向FFE2(RX)特征发送数据
+
+        Args:
+            data: 要发送的字节数组
+        """
+        if not self.client or not self.client.is_connected:
+            print("✗ 未连接到设备")
+            return False
+
+        if not self.rx_characteristic:
+            print("✗ RX特征(FFE2)未找到")
+            return False
+
+        try:
+            print(f"\n正在发送数据到FFE2(RX)...")
+            print(f"  数据(hex): {data.hex()}")
+            await self.client.write_gatt_char(par_rx_characteristic, data)
+            print(f"✓ 数据发送成功!")
+            return True
+        except Exception as e:
+            print(f"✗ 数据发送失败: {e}")
+            return False
+
     async def disconnect(self):
         """断开当前连接"""
         if self.client and self.client.is_connected:
             print(f"\n正在断开连接...")
             try:
+                # 停止通知
                 await self.client.stop_notify(par_tx_characteristic)
-            except:
-                pass
+            except Exception as e:
+                pass  # 忽略停止通知的错误
 
             try:
-                await self.client.disconnect()
+                # 使用超时机制，最多等待5秒
+                await asyncio.wait_for(self.client.disconnect(), timeout=5.0)
                 print("✓ 已断开连接")
-            except:
-                print("✗ 断开连接失败")
+            except asyncio.TimeoutError:
+                print("⚠ 断开连接超时，但连接已标记为断开")
+            except Exception as e:
+                print(f"✗ 断开连接失败: {e}")
             finally:
                 self.is_connected = False
+                # 强制清理client引用，帮助垃圾回收
+                self.client = None
         else:
             print("当前未连接到设备")
 
@@ -461,17 +551,24 @@ async def main():
     """主函数"""
     import platform
 
-    # 检查命令行参数
-    if len(sys.argv) < 2:
-        print(f"\n用法: python ble_connect.py <设备地址>")
-        print(f"示例: python ble_connect.py {par_device_addr}")
-        print(f"\n默认设备地址: {par_device_addr}")
-        address = input(f"\n请输入设备地址 (直接回车使用默认): ").strip()
-        if not address:
-            address = par_device_addr
+    # 检查命令行参数，如果没有参数则使用默认值
+    if len(sys.argv) < 3:
+        address = par_device_addr
+        mode = '1'
+        print(f"\n使用默认参数:")
+        print(f"  设备地址: {address}")
+        print(f"  工作模式: {mode} (接收模式)")
     else:
         address = sys.argv[1]
+        mode = sys.argv[2]
 
+    # 验证模式参数
+    if mode not in ['1', '2']:
+        print(f"\n✗ 无效的模式: {mode}")
+        print(f"  请使用 1 (接收模式) 或 2 (发送模式)")
+        sys.exit(1)
+
+    mode_name = "接收模式 (监听FFE1)" if mode == '1' else "发送模式 (发送到FFE2)"
     system = platform.system()
 
     print(f"\n{'='*60}")
@@ -479,6 +576,7 @@ async def main():
     print(f"{'='*60}")
     print(f"系统: {system}")
     print(f"目标设备地址: {address}")
+    print(f"工作模式: {mode_name}")
     print(f"TX特征UUID (接收数据): {par_tx_characteristic}")
     print(f"RX特征UUID (发送数据): {par_rx_characteristic}")
     print(f"连接超时: {CONNECTION_TIMEOUT}秒")
@@ -492,15 +590,30 @@ async def main():
 
     manager = BLEConnectionManager()
 
-    # 直接连接
-    print(f"\n开始连接到设备: {address}")
-    success = await manager.connect_with_retry(address)
+    try:
+        # 连接到设备
+        print(f"\n开始连接到设备: {address}")
+        success = await manager.connect_for_mode(address, mode)
 
-    if success:
-        print("\n连接已完成")
-    else:
-        print("\n连接失败")
-        sys.exit(1)
+        if success:
+            if mode == '2':
+                # 发送模式：发送重启命令 0xee 0xee
+                print(f"\n{'='*60}")
+                print("发送重启命令")
+                print(f"{'='*60}")
+                reboot_data = bytearray([0xee, 0xee])
+                await manager.send_data(reboot_data)
+                print(f"\n重启命令已发送，稍等片刻设备重启...")
+                await asyncio.sleep(2)
+
+            print("\n操作已完成")
+        else:
+            print("\n操作失败")
+            sys.exit(1)
+
+    finally:
+        # 确保无论如何都断开连接
+        await manager.disconnect()
 
 
 if __name__ == "__main__":
