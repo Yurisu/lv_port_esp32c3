@@ -44,7 +44,12 @@
 // 图片传输协议相关定义
 #define CMD_INIT_FRAME          0xD1  // 初始化帧
 #define CMD_DATA_FRAME          0xD2  // 数据帧
-#define CMD_RESET_FRAME          0xEE  // 数据帧
+#define CMD_DELETE_FRAME         0xD4  // 删除文件帧
+// 系统命令定义（多字节命令）
+#define CMD_SYS_PREFIX          0xEE  // 系统命令前缀
+#define CMD_FORMAT_LEN           7     // 格式化命令长度
+#define CMD_DIR_LEN             4     // 列出目录命令长度
+#define CMD_RESET_LEN           6     // 重启命令长度
 #define MAX_FILENAME_LEN        64
 #define MAX_FILE_SIZE           1024 * 1024  // 最大1MB
 
@@ -99,6 +104,11 @@ static uint16_t be_to_u16(const uint8_t *data) {
 }
 //数据处理函数
 static void process_protocol_data(const uint8_t *data, uint16_t length);
+
+// 协议帧处理函数
+static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length);
+static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length);
+static esp_err_t handle_delete_frame(const uint8_t *data, uint16_t length);
 
 //hid
 #include "hidd_le_prf_int.h"
@@ -594,6 +604,80 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
     return ESP_OK;
 }
 
+// 处理删除文件帧（0xD4命令）
+// 帧结构：命令(1) | checksum(2) | 长度(1) | 文件名(N)
+static esp_err_t handle_delete_frame(const uint8_t *data, uint16_t length) {
+    ESP_LOGI("CMDp", "Handling delete frame, length=%d", length);
+
+    // 最小帧长度：命令(1) + checksum(2) + 长度(1) + 文件名(1) = 5字节
+    if (length < 5) {
+        ESP_LOGE("CMDp", "Delete frame too short: %d < 5", length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t cmd = data[0];
+    uint16_t received_checksum = be_to_u16(&data[1]);
+    uint8_t filename_len = data[3];
+
+    // 检查命令是否为0xD4
+    if (cmd != CMD_DELETE_FRAME) {
+        ESP_LOGE("CMDp", "Invalid delete frame command: 0x%02X", cmd);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查文件名长度是否合法
+    if (filename_len == 0 || filename_len >= MAX_FILENAME_LEN) {
+        ESP_LOGE("CMDp", "Invalid filename length: %d", filename_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查总长度是否匹配
+    uint16_t expected_length = 1 + 2 + 1 + filename_len; // 命令 + checksum + 长度 + 文件名
+    if (length != expected_length) {
+        ESP_LOGE("CMDp", "Length mismatch: expected %d, got %d", expected_length, length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // 验证checksum（校验数据：长度+文件名）
+    uint16_t calc_checksum = checksum16(&data[3], length - 3); // 从长度字段开始校验
+    if (received_checksum != calc_checksum) {
+        ESP_LOGE("CMDp", "Checksum error: received=0x%04X, calculated=0x%04X",
+                 received_checksum, calc_checksum);
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    // 复制文件名
+    char filename[MAX_FILENAME_LEN];
+    memset(filename, 0, MAX_FILENAME_LEN);
+    memcpy(filename, &data[4], filename_len);
+    filename[filename_len] = '\0';
+
+    ESP_LOGI("CMDp", "Delete frame valid - File: %s", filename);
+
+    // 构建完整文件路径
+    char filepath[MAX_FILENAME_LEN + 8];
+    snprintf(filepath, sizeof(filepath), "A:/%s", filename);
+
+    // 删除文件
+    lv_fs_res_t ret = lv_port_fs_remove(filepath);
+
+    // 发送响应
+    char response[128];
+    if (ret == LV_FS_RES_OK) {
+        snprintf(response, sizeof(response), "Delete: OK - %s", filename);
+        ESP_LOGI("CMDp", "File deleted successfully: %s", filename);
+    } else {
+        snprintf(response, sizeof(response), "Delete: Failed - %s", filename);
+        ESP_LOGE("CMDp", "Failed to delete file: %s", filename);
+    }
+
+    if (notifyEN()) {
+        nus_uart_send_data(hid_conn_id, (uint8_t*)response, strlen(response));
+    }
+
+    return (ret == LV_FS_RES_OK) ? ESP_OK : ESP_FAIL;
+}
+
 // 处理数据帧（0xD2命令）
 // 帧结构：命令(1) | checksum(2) | 包号(4) | 长度(1) | 数据负载(N)
 static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
@@ -752,10 +836,10 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         if (hid_conn_id != 0) {
             esp_ble_conn_update_params_t conn_params = {0};
             memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
-            conn_params.latency = 0;
-            conn_params.max_int = 0x20;    // max_int = 0x20*1.25ms = 40ms
+            conn_params.latency = 3;
+            conn_params.max_int = 0x100;    // max_int = 0x20*1.25ms = 40ms
             conn_params.min_int = 0x10;    // min_int = 0x10*1.25ms = 20ms
-            conn_params.timeout = 500;     // timeout = 500*10ms = 5000ms
+            conn_params.timeout = 900;     // timeout = 500*10ms = 5000ms
             esp_err_t ret = esp_ble_gap_update_conn_params(&conn_params);
             if (ret != ESP_OK) {
                 ESP_LOGE("HIDevent", "Failed to update conn params: %s", esp_err_to_name(ret));
@@ -871,11 +955,70 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                 }
             }
             break;
-        //0xEE
-        case CMD_RESET_FRAME:
-            // 重启mcu
-            ESP_LOGI("CMDp", "Resetting MCU");
-            esp_restart();
+        //0xD4
+        case CMD_DELETE_FRAME:
+            // 处理删除文件命令
+            if (handle_delete_frame(data, length) != ESP_OK) {
+                ESP_LOGE("CMDp", "Failed to handle delete frame");
+            }
+            break;
+        //0xEE - 系统命令
+        case CMD_SYS_PREFIX:
+            if (length >= 2) {
+                // 检查多字节系统命令
+                // 格式化命令：0xEE 0x66 0x6F 0x72 0x6D 0x61 0x74 ("format")
+                if (length == CMD_FORMAT_LEN &&
+                    data[1] == 0x66 && data[2] == 0x6F && data[3] == 0x72 &&
+                    data[4] == 0x6D && data[5] == 0x61 && data[6] == 0x74) {
+                    ESP_LOGI("CMDp", "Format command received");
+
+                    lv_fs_res_t ret = lv_port_fs_format();
+                    char response[64];
+                    snprintf(response, sizeof(response), "Format: %s",
+                             (ret == LV_FS_RES_OK) ? "OK" : "Failed");
+
+                    if (notifyEN()) {
+                        nus_uart_send_data(hid_conn_id, (uint8_t*)response, strlen(response));
+                    }
+                }
+                // 列出目录命令：0xEE 0x64 0x69 0x72 ("dir")
+                else if (length == CMD_DIR_LEN &&
+                         data[1] == 0x64 && data[2] == 0x69 && data[3] == 0x72) {
+                    ESP_LOGI("CMDp", "List directory command received");
+
+                    char *dir_content = lv_port_fs_get_dir_content("/");
+                    if (dir_content) {
+                        if (notifyEN()) {
+                            nus_uart_send_data(hid_conn_id, (uint8_t*)dir_content, strlen(dir_content));
+                        }
+                        free(dir_content);
+                    } else {
+                        const char *error_msg = "Error: Failed to get directory content";
+                        if (notifyEN()) {
+                            nus_uart_send_data(hid_conn_id, (uint8_t*)error_msg, strlen(error_msg));
+                        }
+                    }
+                }
+                // 重启命令：0xEE 0x72 0x65 0x73 0x65 0x74 ("reset")
+                else if (length == CMD_RESET_LEN &&
+                         data[1] == 0x72 && data[2] == 0x65 && data[3] == 0x65 &&
+                         data[4] == 0x74) {
+                    ESP_LOGI("CMDp", "Reset command received");
+
+                    if (notifyEN()) {
+                        const char *msg = "Resetting MCU...";
+                        nus_uart_send_data(hid_conn_id, (uint8_t*)msg, strlen(msg));
+                        vTaskDelay(pdMS_TO_TICKS(100));  // 等待消息发送
+                    }
+
+                    esp_restart();
+                }
+                else {
+                    ESP_LOGW("CMDp", "Unknown system command, length=%d", length);
+                }
+            } else {
+                ESP_LOGW("CMDp", "System command too short, length=%d", length);
+            }
             break;
 
         default:
@@ -890,7 +1033,6 @@ void hid_demo_task(void *pvParameters)
     while (1)
     {
         vTaskDelay(2000 / portTICK_PERIOD_MS);
-        // 通过NUS发送数据到FFE1 (TX特征)
             
         if (sec_conn)
         {
@@ -1131,7 +1273,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
       esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
       esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 
-      xTaskCreate(&hid_demo_task, "hid_task", 4096, NULL, 5, NULL);
+      //xTaskCreate(&hid_demo_task, "hid_task", 4096, NULL, 5, NULL);
     }
 
 
@@ -1185,13 +1327,12 @@ vTaskDelay(pdMS_TO_TICKS(100));
   lv_indev_drv_register(&indev_drv);
 #endif
 
-  const esp_timer_create_args_t periodic_timer_args = {
-      .callback = &lv_tick_task, .name = "screen"};
-  esp_timer_handle_t periodic_timer;
-  ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-  ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000));
+//   const esp_timer_create_args_t periodic_timer_args = {
+//       .callback = &lv_tick_task, .name = "screen"};
+//   esp_timer_handle_t periodic_timer;
+//   ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
+//   ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000));
 
-  ESP_LOGI(__FILENAME__, "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
 
 
   // 启动 LVGL widgets demo
@@ -1207,24 +1348,35 @@ vTaskDelay(pdMS_TO_TICKS(100));
   //   }
   // #endif
 
-    // 创建全屏背景图片
-    lv_obj_t *bg_img = lv_img_create(lv_scr_act());
-
-    // 从 LittleFS 加载背景图片
-    lv_img_set_src(bg_img, "A:/1.sjpg");
-    const void *src = lv_img_get_src(bg_img);
+    // 创建全屏背景图片 (128*128)
+    static lv_obj_t *bg_img;
+    bg_img = lv_img_create(lv_scr_act());
+    lv_img_set_src(bg_img, "A:/t-1.sjpg");
     lv_obj_set_size(bg_img, LV_HOR_RES, LV_VER_RES);
     lv_obj_center(bg_img);
 
-    // 创建显示开机时间的标签
-    static lv_obj_t *time_label;
-    time_label = lv_label_create(lv_scr_act());
-    if (time_label != NULL) {
-        lv_label_set_text(time_label, "Uptime: 0s");
-        lv_obj_set_style_text_color(time_label, lv_color_black(), 0);
-        lv_obj_set_style_text_font(time_label, &lv_font_montserrat_14, 0);//14/26/38
-        lv_obj_align(time_label, LV_ALIGN_TOP_MID, 0, 20);
-    }
+    // 创建上层图片 (64*128) 显示在右侧
+    static lv_obj_t *bom_img;
+    bom_img = lv_img_create(lv_scr_act());
+    lv_img_set_src(bom_img, "A:/b-1.sjpg");
+    lv_obj_set_size(bom_img, 128, 64);
+    lv_obj_align(bom_img, LV_ALIGN_TOP_LEFT, 0, 64);
+
+    // 创建top标签
+    static lv_obj_t *top_label;
+    top_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(top_label, "Uptime: 0s");
+    lv_obj_set_style_text_color(top_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(top_label, &lv_font_montserrat_10, 0);
+    lv_obj_align(top_label, LV_ALIGN_TOP_MID, 0, 0);
+
+    // 创建信息标签
+    static lv_obj_t *bom_label;
+    bom_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(bom_label, "4444");
+    lv_obj_set_style_text_color(bom_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(bom_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(bom_label, LV_ALIGN_TOP_MID, 36, 100);
 
 
 
@@ -1233,25 +1385,29 @@ vTaskDelay(pdMS_TO_TICKS(100));
   uint32_t uptime_seconds = 0;
 
   while (1) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGI(__FILENAME__, "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
+
+    vTaskDelay(pdMS_TO_TICKS(10000));
 
     // 更新开机时间显示
     uptime_seconds++;
-    if (time_label != NULL) {
+    if (top_label != NULL) {
 
-        uint8_t nus_data[15] = "";
-        sprintf((char*)nus_data, "Uptime: %lu", uptime_seconds);
+        char nus_data[30] = "";
+        sprintf((char*)nus_data, "%02X:%02X:%02X:%02X:%02X:%02X %lu", macAddr[0], macAddr[1],macAddr[2],macAddr[3],macAddr[4],macAddr[5], uptime_seconds);
         // 检查notify是否已启用
         if (notifyEN()) {
-        esp_err_t ret = nus_uart_send_data(hid_conn_id, nus_data, strlen((char*)nus_data));
+        esp_err_t ret = nus_uart_send_data(hid_conn_id, (uint8_t*)nus_data, strlen((char*)nus_data));
             if (ret == ESP_OK) {
                 ESP_LOGI("HIDtask", "NUS data sent successfully");
             } else {
                 ESP_LOGE("HIDtask", "NUS data send failed: %s", esp_err_to_name(ret));
             }
         }
-        lv_label_set_text_fmt(time_label, "Uptime: %lus", uptime_seconds);
+        lv_label_set_text_fmt(top_label, nus_data);
     }
+    
+    lv_tick_inc(100);
     lv_task_handler();
   }
 

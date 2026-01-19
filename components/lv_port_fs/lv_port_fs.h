@@ -31,6 +31,10 @@ extern "C" {
  * GLOBAL PROTOTYPES
  **********************/
 void lv_port_fs_init(void);
+lv_fs_res_t lv_port_fs_remove(const char * path);
+lv_fs_res_t lv_port_fs_format(void);
+void lv_port_fs_list_dir(const char * path);
+char* lv_port_fs_get_dir_content(const char * path);
 
 /**********************
  *      MACROS

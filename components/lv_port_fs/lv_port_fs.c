@@ -316,7 +316,7 @@ static lv_fs_res_t fs_dir_read(lv_fs_drv_t * drv, void * rddir_p,
 
 /**
  * @brief 关闭目录
- * 
+ *
  * @inputs
  *  - drv: LVGL 文件系统驱动指针
  *  - rddir_p: 目录句柄
@@ -329,4 +329,189 @@ static lv_fs_res_t fs_dir_close(lv_fs_drv_t * drv, void * rddir_p)
     if (!rddir_p) return LV_FS_RES_UNKNOWN;
     closedir((DIR *)rddir_p);
     return LV_FS_RES_OK;
+}
+
+/**
+ *
+ * @brief 格式化 LittleFS 文件系统
+ *
+ * @inputs 无
+// 格式化文件系统
+lv_port_fs_format();
+// 列出根目录
+lv_port_fs_list_dir("/");
+// 列出指定子目录
+lv_port_fs_list_dir("/images");
+ * @outputs
+ *  - 返回 LV_FS_RES_OK 成功，LV_FS_RES_UNKNOWN 失败
+ */
+lv_fs_res_t lv_port_fs_format(void)
+{
+    esp_err_t ret = esp_littlefs_format(NULL);  // 使用默认分区
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "LittleFS formatted successfully");
+        return LV_FS_RES_OK;
+    } else {
+        ESP_LOGE(TAG, "Failed to format LittleFS (%s)", esp_err_to_name(ret));
+        return LV_FS_RES_UNKNOWN;
+    }
+}
+
+/**
+ * @brief 列出指定目录下的所有文件和子目录
+ *
+ * @inputs
+ *  - path: 目录路径，如 "/" 或 "/images"
+ * @outputs 无（通过日志输出）
+ */
+void lv_port_fs_list_dir(const char * path)
+{
+    char dirpath[256];
+    const char *p = path;
+    if (p[1] == ':') p += 2;   // 去掉 LVGL 的盘符，如 "A:"
+
+    if (*p == '/') {
+        snprintf(dirpath, sizeof(dirpath), LV_FS_PATH "%s", p);
+    } else {
+        snprintf(dirpath, sizeof(dirpath), LV_FS_PATH "/%s", p);
+    }
+
+    ESP_LOGI(TAG, "=== Listing directory: %s ===", dirpath);
+
+    DIR *dir = opendir(dirpath);
+    if (dir == NULL) {
+        ESP_LOGE(TAG, "Failed to open directory %s (errno=%d)", dirpath, errno);
+        return;
+    }
+
+    struct dirent *ent;
+    int file_count = 0;
+    int dir_count = 0;
+
+    while ((ent = readdir(dir)) != NULL) {
+        struct stat st;
+        char fullpath[512];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, ent->d_name);
+
+        if (stat(fullpath, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                ESP_LOGI(TAG, "[DIR]  %s/", ent->d_name);
+                dir_count++;
+            } else {
+                ESP_LOGI(TAG, "[FILE] %s (%ld bytes)", ent->d_name, st.st_size);
+                file_count++;
+            }
+        } else {
+            ESP_LOGI(TAG, "[?]    %s", ent->d_name);
+        }
+    }
+    closedir(dir);
+
+    ESP_LOGI(TAG, "=== Total: %d files, %d directories ===", file_count, dir_count);
+}
+
+/**
+ * @brief 删除文件或目录（公共接口）
+ *
+ * @inputs
+ *  - path: 文件或目录路径，可以是绝对路径或相对路径
+ * @outputs
+ *  - 返回 LV_FS_RES_OK 成功，LV_FS_RES_UNKNOWN 失败
+ */
+lv_fs_res_t lv_port_fs_remove(const char * path)
+{
+    if (!path) return LV_FS_RES_UNKNOWN;
+
+    char filepath[256];
+    const char *p = path;
+    if (p[1] == ':') p += 2;   // 去掉 LVGL 的盘符，如 "A:"
+
+    if (*p == '/') {
+        snprintf(filepath, sizeof(filepath), LV_FS_PATH "%s", p);
+    } else {
+        snprintf(filepath, sizeof(filepath), LV_FS_PATH "/%s", p);
+    }
+
+    struct stat st;
+    if (stat(filepath, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) {
+            if (rmdir(filepath) == 0) {
+                ESP_LOGI(TAG, "Directory removed: %s", filepath);
+                return LV_FS_RES_OK;
+            }
+        } else {
+            if (remove(filepath) == 0) {
+                ESP_LOGI(TAG, "File removed: %s", filepath);
+                return LV_FS_RES_OK;
+            }
+        }
+    }
+
+    ESP_LOGE(TAG, "Failed to remove %s (errno=%d)", filepath, errno);
+    return LV_FS_RES_UNKNOWN;
+}
+
+/**
+ * @brief 获取指定目录下的所有文件和子目录内容
+ *
+ * @inputs
+ *  - path: 目录路径，如 "/" 或 "/images"
+ * @outputs
+ *  - 返回包含目录内容的字符串（需调用者释放），失败返回NULL
+ */
+char* lv_port_fs_get_dir_content(const char * path)
+{
+    char dirpath[256];
+    const char *p = path;
+    if (p[1] == ':') p += 2;   // 去掉 LVGL 的盘符，如 "A:"
+
+    if (*p == '/') {
+        snprintf(dirpath, sizeof(dirpath), LV_FS_PATH "%s", p);
+    } else {
+        snprintf(dirpath, sizeof(dirpath), LV_FS_PATH "/%s", p);
+    }
+
+    DIR *dir = opendir(dirpath);
+    if (dir == NULL) {
+        ESP_LOGE(TAG, "Failed to open directory %s (errno=%d)", dirpath, errno);
+        char *result = malloc(64);
+        if (result) {
+            snprintf(result, 64, "Error: Open failed (errno=%d)", errno);
+        }
+        return result;
+    }
+
+    // 分配缓冲区用于存储目录内容
+    char *result = malloc(2048);
+    if (!result) {
+        closedir(dir);
+        return NULL;
+    }
+    memset(result, 0, 2048);
+
+    struct dirent *ent;
+    int file_count = 0;
+    int dir_count = 0;
+    int offset = 0;
+
+    while ((ent = readdir(dir)) != NULL && offset < 1800) {
+        struct stat st;
+        char fullpath[512];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dirpath, ent->d_name);
+
+        if (stat(fullpath, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                offset += snprintf(result + offset, 2048 - offset, "[DIR]  %s/\n", ent->d_name);
+                dir_count++;
+            } else {
+                offset += snprintf(result + offset, 2048 - offset, "[FILE] %s (%ld bytes)\n", ent->d_name, st.st_size);
+                file_count++;
+            }
+        }
+    }
+    closedir(dir);
+
+    offset += snprintf(result + offset, 2048 - offset, "Total: %d files, %d directories", file_count, dir_count);
+
+    return result;
 }
