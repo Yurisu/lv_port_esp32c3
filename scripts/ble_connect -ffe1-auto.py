@@ -6,24 +6,10 @@ BLE设备连接工具 - 带重试和错误处理
 2. 连接到指定设备并访问FFE2特征
 3. 自动重试机制
 4. 详细的错误诊断
-5. 图片传输功能（0xD1/0xD2协议）
-# 接收模式（默认）
-python ble_connect.py
-
-# 接收模式
-python ble_connect.py 10:00:3B:D1:43:36 1
-
-# 发送重启命令
-python ble_connect.py 10:00:3B:D1:43:36 2
-
-# 发送图片文件
-python ble_connect.py 10:00:3B:D1:43:36 3 image.jpg
-
 """
 
 import asyncio
 import sys
-import os
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -39,24 +25,6 @@ par_device_addr = "10:00:3B:D1:43:36"
 CONNECTION_TIMEOUT = 60.0  # 连接超时时间(秒) - 增加到60秒
 MAX_RETRIES = 3  # 最大重试次数
 RETRY_DELAY = 2.0  # 重试延迟(秒)
-
-# 图片传输参数
-MAX_PAYLOAD_SIZE = 255  # 最大负载字节数
-TRANSFER_CHUNK_DELAY = 0.01  # 数据帧发送延迟(秒)
-
-
-def checksum16(data: bytes) -> bytes:
-    """
-    计算校验和（所有字节相加后取低16位）
-
-    Args:
-        data: 要校验的数据
-
-    Returns:
-        bytes: 2字节的校验码（大端序）
-    """
-    checksum = sum(data) & 0xFFFF
-    return checksum.to_bytes(2, byteorder='big')
 
 
 class BLEConnectionManager:
@@ -474,159 +442,6 @@ class BLEConnectionManager:
             print(f"✗ 数据发送失败: {e}")
             return False
 
-    async def send_image_file(self, filepath: str):
-        """
-        通过FFE2发送图片文件，使用0xD1和0xD2协议
-
-        Args:
-            filepath: 图片文件路径
-        """
-        if not (self.client and self.client.is_connected and self.rx_characteristic):
-            print("✗ 未连接到设备或RX特征未找到")
-            return False
-
-        try:
-            # 读取文件
-            print(f"\n{'='*60}")
-            print("开始图片传输")
-            print(f"{'='*60}")
-
-            if not os.path.exists(filepath):
-                print(f"✗ 文件不存在: {filepath}")
-                return False
-
-            with open(filepath, 'rb') as f:
-                file_data = f.read()
-
-            filename = os.path.basename(filepath)
-            file_size = len(file_data)
-
-            print(f"文件信息:")
-            print(f"  文件名: {filename}")
-            print(f"  文件大小: {file_size} 字节")
-
-            # 步骤1: 发送0xD1初始化帧
-            print(f"\n发送0xD1初始化帧...")
-            init_frame = self._build_d1_init_frame(file_size, filename)
-            if not await self.send_raw_data(init_frame):
-                return False
-
-            # 步骤2: 发送0xD2数据帧
-            print(f"\n发送0xD2数据帧...")
-            await self._send_d2_data_frames(file_data)
-
-            print(f"\n{'='*60}")
-            print("✓ 图片传输完成!")
-            print(f"{'='*60}")
-            return True
-
-        except Exception as e:
-            print(f"✗ 图片传输失败: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def _build_d1_init_frame(self, file_size: int, filename: str) -> bytes:
-        """
-        构建0xD1初始化帧
-
-        Args:
-            file_size: 文件总字节数
-            filename: 文件名（ASCII编码）
-
-        Returns:
-            bytes: 完整的0xD1帧
-        """
-        filename_bytes = filename.encode('ascii')
-        file_size_bytes = file_size.to_bytes(4, byteorder='big')
-        length_byte = len(filename_bytes).to_bytes(1, byteorder='big')
-
-        # 构建待校验数据：文件大小 + 长度 + 文件名
-        checksum_data = file_size_bytes + length_byte + filename_bytes
-        checksum = checksum16(checksum_data)
-
-        # 组装帧：命令(0xD1) + checksum(2字节) + 文件大小(4字节) + 长度(1字节) + 文件名
-        frame = bytes([0xD1]) + checksum + file_size_bytes + length_byte + filename_bytes
-
-        print(f"  0xD1帧结构:")
-        print(f"    命令: 0x{frame[0]:02X}")
-        print(f"    Checksum: {frame[1:3].hex()}")
-        print(f"    文件大小: {file_size} (0x{file_size_bytes.hex()})")
-        print(f"    文件名长度: {len(filename_bytes)}")
-        print(f"    文件名: {filename}")
-
-        return frame
-
-    async def _send_d2_data_frames(self, file_data: bytes):
-        """
-        发送0xD2数据帧
-
-        Args:
-            file_data: 完整的文件数据
-        """
-        total_size = len(file_data)
-        total_chunks = (total_size + MAX_PAYLOAD_SIZE - 1) // MAX_PAYLOAD_SIZE
-        packet_num = 0
-
-        for offset in range(0, total_size, MAX_PAYLOAD_SIZE):
-            packet_num += 1
-            payload = file_data[offset:offset + MAX_PAYLOAD_SIZE]
-            payload_size = len(payload)
-
-            # 构建数据帧
-            data_frame = self._build_d2_data_frame(packet_num, payload)
-
-            # 发送数据
-            print(f"\n  发送第{packet_num}/{total_chunks}帧，大小: {payload_size}字节")
-            if not await self.send_raw_data(data_frame):
-                print(f"✗ 第{packet_num}帧发送失败")
-                return False
-
-            # 每帧发送后都延迟，避免数据堆积
-            await asyncio.sleep(TRANSFER_CHUNK_DELAY)
-
-        return True
-
-    def _build_d2_data_frame(self, packet_num: int, payload: bytes) -> bytes:
-        """
-        构建单个0xD2数据帧
-
-        Args:
-            packet_num: 包号（从1开始）
-            payload: 负载数据
-
-        Returns:
-            bytes: 完整的0xD2帧
-        """
-        packet_num_bytes = packet_num.to_bytes(4, byteorder='big')
-        length_byte = len(payload).to_bytes(1, byteorder='big')
-
-        # 构建待校验数据：包号 + 长度 + 负载
-        checksum_data = packet_num_bytes + length_byte + payload
-        checksum = checksum16(checksum_data)
-
-        # 组装帧：命令(0xD2) + checksum(2字节) + 包号(4字节) + 长度(1字节) + 负载
-        frame = bytes([0xD2]) + checksum + packet_num_bytes + length_byte + payload
-
-        return frame
-
-    async def send_raw_data(self, data: bytes) -> bool:
-        """
-        发送原始数据到FFE2
-
-        Args:
-            data: 要发送的字节数据
-
-        Returns:
-            bool: 是否发送成功
-        """
-        try:
-            await self.client.write_gatt_char(par_rx_characteristic, data)
-            return True
-        except Exception as e:
-            print(f"✗ 发送数据失败: {e}")
-            return False
-
     async def disconnect(self):
         """断开当前连接"""
         if self.client and self.client.is_connected:
@@ -656,41 +471,24 @@ async def main():
     """主函数"""
     import platform
 
-    # 检查命令行参数
-    if len(sys.argv) < 2:
-        print(f"\n用法: python ble_connect.py <设备地址> <模式> [文件路径]")
-        print(f"  模式 1: 接收模式 - 连接FFE1并监听数据")
-        print(f"  模式 2: 发送模式 - 发送重启命令")
-        print(f"  模式 3: 图片传输模式 - 发送图片文件 (需要提供文件路径)")
-        print(f"\n示例:")
-        print(f"  python ble_connect.py {par_device_addr} 1")
-        print(f"  python ble_connect.py {par_device_addr} 2")
-        print(f"  python ble_connect.py {par_device_addr} 3 image.jpg")
-        print(f"  python ble_connect.py                    # 使用默认参数: {par_device_addr} 1")
-        sys.exit(1)
-
-    address = sys.argv[1]
-    mode = sys.argv[2] if len(sys.argv) > 2 else '1'
-    filepath = sys.argv[3] if len(sys.argv) > 3 else None
+    # 检查命令行参数，如果没有参数则使用默认值
+    if len(sys.argv) < 3:
+        address = par_device_addr
+        mode = '1'
+        print(f"\n使用默认参数:")
+        print(f"  设备地址: {address}")
+        print(f"  工作模式: {mode} (接收模式)")
+    else:
+        address = sys.argv[1]
+        mode = sys.argv[2]
 
     # 验证模式参数
-    if mode not in ['1', '2', '3']:
+    if mode not in ['1', '2']:
         print(f"\n✗ 无效的模式: {mode}")
-        print(f"  请使用 1 (接收模式), 2 (发送重启命令), 或 3 (图片传输)")
+        print(f"  请使用 1 (接收模式) 或 2 (发送模式)")
         sys.exit(1)
 
-    # 模式3需要文件路径
-    if mode == '3' and not filepath:
-        print(f"\n✗ 图片传输模式需要指定文件路径")
-        print(f"  用法: python ble_connect.py {par_device_addr} 3 <文件路径>")
-        sys.exit(1)
-
-    mode_name = {
-        '1': "接收模式 (监听FFE1)",
-        '2': "发送模式 (发送重启命令)",
-        '3': "图片传输模式"
-    }[mode]
-
+    mode_name = "接收模式 (监听FFE1)" if mode == '1' else "发送模式 (发送到FFE2)"
     system = platform.system()
 
     print(f"\n{'='*60}")
@@ -704,9 +502,6 @@ async def main():
     print(f"连接超时: {CONNECTION_TIMEOUT}秒")
     print(f"最大重试: {MAX_RETRIES}次")
 
-    if mode == '3' and filepath:
-        print(f"待发送文件: {filepath}")
-
     if system == "Windows":
         print("\nWindows提示:")
         print("- BLE连接可能需要30-60秒")
@@ -717,13 +512,11 @@ async def main():
 
     try:
         print(f"\n开始连接到设备: {address}")
-        # 使用发送模式连接（模式2和模式3都需要FFE2）
-        connect_mode = '2' if mode in ['2', '3'] else '1'
-        success = await manager.connect_for_mode(address, connect_mode)
+        success = await manager.connect_for_mode(address, mode)
 
         if success:
             if mode == '2':
-                # 发送重启命令 0xee 0xee
+                # 发送模式：发送重启命令 0xee 0xee
                 print(f"\n{'='*60}")
                 print("发送重启命令")
                 print(f"{'='*60}")
@@ -731,12 +524,6 @@ async def main():
                 await manager.send_data(reboot_data)
                 print(f"\n重启命令已发送，稍等片刻设备重启...")
                 await asyncio.sleep(2)
-
-            elif mode == '3':
-                # 图片传输模式
-                success = await manager.send_image_file(filepath)
-                if not success:
-                    sys.exit(1)
 
             print("\n操作已完成")
         else:
