@@ -41,6 +41,12 @@
 #include "esp_mac.h" // 标准MAC API
 #include "esp_bt_device.h"
 
+//hid
+#include "hidd_le_prf_int.h"
+#include "esp_hidd_prf_api.h"
+#include "hid_dev.h"
+#include "esp_hidd_api.h"
+
 // 图片传输协议相关定义
 #define CMD_INIT_FRAME          0xD1  // 初始化帧
 #define CMD_DATA_FRAME          0xD2  // 数据帧
@@ -52,6 +58,11 @@
 #define CMD_RESET_LEN           6     // 重启命令长度
 #define MAX_FILENAME_LEN        64
 #define MAX_FILE_SIZE           1024 * 1024  // 最大1MB
+
+// 回传协议应用ID定义（从0x01开始）
+#define APP_ID_STATUS           0x01  // 状态信息（MAC地址、运行时间等）
+#define APP_ID_DELETE           0xD4  // 删除文件响应
+#define APP_ID_SYSTEM           0xEE  // 系统命令响应（格式化、列出目录、重启等）
 
 // 协议状态枚举
 typedef enum {
@@ -102,7 +113,7 @@ static uint32_t be_to_u32(const uint8_t *data) {
 static uint16_t be_to_u16(const uint8_t *data) {
     return ((uint16_t)data[0] << 8) | (uint16_t)data[1];
 }
-//数据处理函数
+// 数据处理函数
 static void process_protocol_data(const uint8_t *data, uint16_t length);
 
 // 协议帧处理函数
@@ -110,11 +121,10 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length);
 static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length);
 static esp_err_t handle_delete_frame(const uint8_t *data, uint16_t length);
 
-//hid
-#include "hidd_le_prf_int.h"
-#include "esp_hidd_prf_api.h"
-#include "hid_dev.h"
-#include "esp_hidd_api.h"
+// 回传协议函数
+static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, uint16_t payload_len);
+
+
 // HID报告配置
 #define BATTERY_REPORT_ID 0x02
 #define BATTERY_REPORT_SIZE 1
@@ -208,10 +218,19 @@ const char* hidden_msg2 = "Professional hardware and software solutions availabl
 #define I2C0_MASTER_SCL_IO             GPIO_NUM_8 
 #define NPD_EN_GPIO                    GPIO_NUM_10
 #define LED_BG_GPIO                    GPIO_NUM_6
-
+#define BATTERY_ADC                    GPIO_NUM_3
 
 #define GPIO_INTERRUPT_PIN             GPIO_NUM_21
 #define GPIO_INTERRUPT_TAG             "GPIO_ISR"
+
+
+#define TSK_MINIMAL_STACK_SIZE         (1024)
+#define MMC_TASK_NAME                 "mmc_task"
+#define MMC_TASK_SAMPLING_RATE        (10000) 
+#define MMC_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 8)
+#define MMC_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
+#define MMC_TAG                         "MMC[APP]"
+
 
 void NPD_EN(int state);
 void BG_EN(int state);
@@ -220,10 +239,10 @@ void BG_EN(int state);
 #define HIGH_LEVEL 1
 volatile bool g_task_run = false;
 
-void lv_tick_task(void *arg) {
-  (void) arg;
-  lv_tick_inc(100);
-}
+// void lv_tick_task(void *arg) {
+//   (void) arg;
+//   lv_tick_inc(100);
+// }
 
 _Noreturn void PrintChipInfo(void *params) {
   (void) params;
@@ -319,116 +338,6 @@ void IIC_init(void) {
         assert(i2c0_bus_hdl);
     }
 }
-
-
-
-
-#define TSK_MINIMAL_STACK_SIZE         (1024)
-
-#define MMC_TASK_NAME                 "mmc_task"
-#define MMC_TASK_SAMPLING_RATE        (10000) 
-#define MMC_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 8)
-#define MMC_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
-
-#define MMC_TAG                         "MMC[APP]"
-
-
-
-
-void i2c0_mmc56x3_task( void *pvParameters ) {
-    // initialize the xLastWakeTime variable with the current time.
-    TickType_t         last_wake_time  = xTaskGetTickCount ();
-    // initialize i2c device configuration
-    mmc56x3_config_t dev_cfg       = I2C_MMC56X3_CONFIG_DEFAULT;
-    mmc56x3_handle_t dev_hdl;
-    //
-    int status = 10;
-    unsigned char carduid[10];
-    unsigned char cardpid[16];
-    
-    // 初始状态：保持下电
-    NPD_EN(0);
-
-  while (1)
-  {
-    g_task_run = false;
-    while (!g_task_run) {
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-
-    // 按键触发，开始上电初始化
-    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
-    
-    // 上电并等待模块稳定
-    NPD_EN(1);
-    vTaskDelay(50 / portTICK_PERIOD_MS);  // 等待50ms让电源稳定
-    
-    // 初始化SI523
-    SI523_Init(i2c0_bus_hdl);
-    vTaskDelay(10 / portTICK_PERIOD_MS);  // 等待10ms让SI523初始化完成
-    
-    // 初始化MMC56X3
-    mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
-    if (dev_hdl == NULL) {
-        ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
-        NPD_EN(0);  // 初始化失败，下电
-        assert(dev_hdl);
-    }
-    //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
-
-    if(SI523_CheckVer() != 0){
-      PCD_SI523_TypeA_Init();
-      //PCD_SI523_TypeA();
-      if(PCD_SI523_TypeA_GetUID()==0){
-        if(SI523_read_NTAG(12, cardpid) == MI_OK){
-          ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
-        }
-        // if(SI523_write_YURIDATA() == MI_OK){
-        //   ESP_LOGI(MMC_TAG, "YURIDATA write successful");
-        // }
-        // memccpy(cardpid, "9876", 4, 4);
-        // if(SI523_write_NTAG(12, cardpid) == MI_OK){
-        //   ESP_LOGI(MMC_TAG, "NTAG write successful");
-        // }
-
-    }}
-
-
-    status = 10;
-    // task loop entry point - 只执行一次测量
-    for(int i = 0; i < status; i++) {
-        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
-        mmc56x3_magnetic_axes_data_t magnetic_axes;
-        esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
-        if(result != ESP_OK) {
-            ESP_LOGE(MMC_TAG, "mmc56x3 device read failed (%s)", esp_err_to_name(result));
-        } else {
-            //ESP_LOGI(MMC_TAG, "Compass X-Axis:  %f mG", magnetic_axes.x_axis);
-            //ESP_LOGI(MMC_TAG, "Compass Y-Axis:  %f mG", magnetic_axes.y_axis);
-            //ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
-            //ESP_LOGI(MMC_TAG, "Compass Heading: %f °", mmc56x3_convert_to_heading(magnetic_axes));
-            ESP_LOGI(MMC_TAG, "True Heading:    %d °", (int)(mmc56x3_convert_to_true_heading(dev_hdl->dev_config.declination, magnetic_axes)));
-            // 成功读取一次数据后退出循环
-            break;
-        }
-        //
-        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
-        // pause between attempts
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-    }
-    
-    // 测量完成，下电节省电量
-    ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
-    NPD_EN(0);
-  }
-    //
-    // free resources
-    mmc56x3_delete( dev_hdl );
-    ESP_LOGI(MMC_TAG, "Task i2c0_mmc56x3_task completed");
-    vTaskDelete( NULL );
-}
-
-
 
 
 
@@ -670,11 +579,8 @@ static esp_err_t handle_delete_frame(const uint8_t *data, uint16_t length) {
         snprintf(response, sizeof(response), "Delete: Failed - %s", filename);
         ESP_LOGE("CMDp", "Failed to delete file: %s", filename);
     }
-
-    if (notifyEN()) {
-        nus_uart_send_data(hid_conn_id, (uint8_t*)response, strlen(response));
-    }
-
+        //nus_uart_send_data(hid_conn_id, (uint8_t*)response, strlen(response));
+        send_upload_response(APP_ID_DELETE, (uint8_t*)response, strlen(response));
     return (ret == LV_FS_RES_OK) ? ESP_OK : ESP_FAIL;
 }
 
@@ -921,7 +827,87 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
+/**
+ * @brief 发送回传协议响应（0xFE协议）
+ *
+ * @inputs
+ *  - app_id: 应用ID（从0x01开始）
+ *  - payload: 数据负载（应用数据）
+ *  - payload_len: 负载长度（1~255）
+ * @outputs
+ *  - 返回 ESP_OK 成功，其他失败
+ *
+ * 帧结构：
+ * 1. 协议头：1字节，固定 0xFE
+ * 2. 应用ID：1字节，由应用赋值，从 0x01 开始
+ * 3. Checksum校验位：2字节，checksum16(长度+数据)，包含长度位和以后的所有字段
+ * 4. 数据长度位：1字节，N（N为负载字节数），范围1~255，随负载变化
+ * 5. 数据负载：N字节，应用数据，具体要求由应用来定，N≤255，尾帧可不足255字节
+ */
+static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, uint16_t payload_len)
+{
+    ESP_LOGI("Upload", "Sending upload response - AppID: 0x%02X, Payload: %d bytes", app_id, payload_len);
 
+    // 检查参数
+    if (payload == NULL || payload_len == 0 || payload_len > 255) {
+        ESP_LOGE("Upload", "Invalid payload parameters: payload=%p, len=%d", payload, payload_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查 notify 是否已启用
+    if (!notifyEN()) {
+        ESP_LOGE("Upload", "Notify not enabled");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 构建帧：协议头(1) + 应用ID(1) + checksum(2) + 长度(1) + 负载(N)
+    uint16_t frame_size = 1 + 1 + 2 + 1 + payload_len;
+    uint8_t *frame = heap_caps_malloc(frame_size, MALLOC_CAP_DMA);
+    
+    if (frame == NULL) {
+        ESP_LOGE("Upload", "Failed to allocate memory for frame");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 1. 协议头：0xFE
+    frame[0] = 0xFE;
+
+    // 2. 应用ID
+    frame[1] = app_id;
+
+    // 3. 数据长度位
+    frame[4] = (uint8_t)payload_len;
+
+    // 4. 数据负载
+    if (payload_len > 0) {
+        memcpy(&frame[5], payload, payload_len);
+    }
+
+    // 5. Checksum校验位（校验：数据长度位 + 数据负载）
+    uint16_t checksum = 0;
+    for (uint16_t i = 0; i < 1 + payload_len; i++) {
+        checksum += frame[4 + i];  // 从数据长度位开始校验，共length(1) + payload(N)字节
+    }
+    checksum &= 0xFFFF;  // 取低16位
+
+    // 写入checksum（大端序）
+    frame[2] = (uint8_t)((checksum >> 8) & 0xFF);
+    frame[3] = (uint8_t)(checksum & 0xFF);
+
+    ESP_LOG_BUFFER_HEX("Upload", frame, frame_size);
+
+    // 发送数据
+    esp_err_t ret = nus_uart_send_data(hid_conn_id, frame, frame_size);
+
+    if (ret == ESP_OK) {
+        ESP_LOGI("Upload", "Upload response sent successfully, frame size: %d bytes", frame_size);
+    } else {
+        ESP_LOGE("Upload", "Failed to send upload response: %s", esp_err_to_name(ret));
+    }
+    
+    heap_caps_free(frame);
+    return ret;
+}
 
 // 协议数据接收入口函数
 static void process_protocol_data(const uint8_t *data, uint16_t length) {
@@ -976,10 +962,8 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                     char response[64];
                     snprintf(response, sizeof(response), "Format: %s",
                              (ret == LV_FS_RES_OK) ? "OK" : "Failed");
-
-                    if (notifyEN()) {
-                        nus_uart_send_data(hid_conn_id, (uint8_t*)response, strlen(response));
-                    }
+                        //nus_uart_send_data(hid_conn_id, (uint8_t*)response, strlen(response));
+                        send_upload_response(APP_ID_SYSTEM, (uint8_t*)response, strlen(response));
                 }
                 // 列出目录命令：0xEE 0x64 0x69 0x72 ("dir")
                 else if (length == CMD_DIR_LEN &&
@@ -988,15 +972,13 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
 
                     char *dir_content = lv_port_fs_get_dir_content("/");
                     if (dir_content) {
-                        if (notifyEN()) {
-                            nus_uart_send_data(hid_conn_id, (uint8_t*)dir_content, strlen(dir_content));
-                        }
+                            //nus_uart_send_data(hid_conn_id, (uint8_t*)dir_content, strlen(dir_content));
+                            send_upload_response(APP_ID_SYSTEM, (uint8_t*)dir_content, strlen(dir_content));
                         free(dir_content);
                     } else {
                         const char *error_msg = "Error: Failed to get directory content";
-                        if (notifyEN()) {
-                            nus_uart_send_data(hid_conn_id, (uint8_t*)error_msg, strlen(error_msg));
-                        }
+                            // nus_uart_send_data(hid_conn_id, (uint8_t*)error_msg, strlen(error_msg));
+                            send_upload_response(APP_ID_SYSTEM, (uint8_t*)error_msg, strlen(error_msg));
                     }
                 }
                 // 重启命令：0xEE 0x72 0x65 0x73 0x65 0x74 ("reset")
@@ -1005,11 +987,10 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                          data[4] == 0x74) {
                     ESP_LOGI("CMDp", "Reset command received");
 
-                    if (notifyEN()) {
                         const char *msg = "Resetting MCU...";
-                        nus_uart_send_data(hid_conn_id, (uint8_t*)msg, strlen(msg));
-                        vTaskDelay(pdMS_TO_TICKS(100));  // 等待消息发送
-                    }
+                        //nus_uart_send_data(hid_conn_id, (uint8_t*)msg, strlen(msg));
+                        send_upload_response(APP_ID_SYSTEM, (uint8_t*)msg, strlen(msg));
+                        vTaskDelay(pdMS_TO_TICKS(500));  // 等待消息发送
 
                     esp_restart();
                 }
@@ -1056,6 +1037,106 @@ void hid_demo_task(void *pvParameters)
             }
         }
     }
+}
+
+
+void i2c0_mmc56x3_task( void *pvParameters ) {
+    // initialize the xLastWakeTime variable with the current time.
+    TickType_t         last_wake_time  = xTaskGetTickCount ();
+    // initialize i2c device configuration
+    mmc56x3_config_t dev_cfg       = I2C_MMC56X3_CONFIG_DEFAULT;
+    mmc56x3_handle_t dev_hdl;
+    //
+    int status = 10;
+    unsigned char carduid[10];
+    unsigned char cardpid[16];
+    
+    // 初始状态：保持下电
+    NPD_EN(0);
+
+  while (1)
+  {
+    g_task_run = false;
+    while (!g_task_run) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // 按键触发，开始上电初始化
+    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
+    
+    // 上电并等待模块稳定
+    NPD_EN(1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    // 初始化SI523
+    SI523_Init(i2c0_bus_hdl);
+    vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms让SI523初始化完成
+
+
+    status = 10;
+    // task loop entry point - 只执行一次测量
+    for(int i = 0; i < status; i++) {    
+        if(SI523_CheckVer() != 0){
+        PCD_SI523_TypeA_Init();
+        //PCD_SI523_TypeA();
+        if(PCD_SI523_TypeA_GetUID()==0){
+            if(SI523_read_NTAG(12, cardpid) == MI_OK){
+            ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
+            break;
+            }
+            // if(SI523_write_YURIDATA() == MI_OK){
+            //   ESP_LOGI(MMC_TAG, "YURIDATA write successful");
+            // }
+            // memccpy(cardpid, "9876", 4, 4);
+            // if(SI523_write_NTAG(12, cardpid) == MI_OK){
+            //   ESP_LOGI(MMC_TAG, "NTAG write successful");
+            // }
+        }}
+    }
+
+    status = 10;
+    // task loop entry point - 只执行一次测量
+    for(int i = 0; i < status; i++) {
+        
+        // 初始化MMC56X3
+        mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
+        if (dev_hdl == NULL) {
+            ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
+            vTaskDelay(pdMS_TO_TICKS(200));
+            //发送复位命令
+            mmc56x3_reset(i2c0_bus_hdl);
+            assert(dev_hdl);
+        }
+        else
+        {
+        //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
+        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
+        mmc56x3_magnetic_axes_data_t magnetic_axes;
+        esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
+        if(result != ESP_OK) {
+            ESP_LOGE(MMC_TAG, "mmc56x3 device read failed (%s)", esp_err_to_name(result));
+        } else {
+            //ESP_LOGI(MMC_TAG, "Compass X-Axis:  %f mG", magnetic_axes.x_axis);
+            //ESP_LOGI(MMC_TAG, "Compass Y-Axis:  %f mG", magnetic_axes.y_axis);
+            //ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
+            //ESP_LOGI(MMC_TAG, "Compass Heading: %f °", mmc56x3_convert_to_heading(magnetic_axes));
+            ESP_LOGI(MMC_TAG, "True Heading:    %d °", (int)(mmc56x3_convert_to_true_heading(dev_hdl->dev_config.declination, magnetic_axes)));
+            // 成功读取一次数据后退出循环
+            break;
+        }
+        }
+        //
+        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
+    }
+    
+    // 测量完成，下电节省电量
+    ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
+    NPD_EN(0);
+  }
+    //
+    // free resources
+    mmc56x3_delete( dev_hdl );
+    ESP_LOGI(MMC_TAG, "Task i2c0_mmc56x3_task completed");
+    vTaskDelete( NULL );
 }
 
 
@@ -1119,7 +1200,7 @@ _Noreturn void app_main(void) {
   gpio_interrupt_init();
 
   // 自动创建任务，按键触发
-  xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+  //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
   //xTaskCreate(BlinkLed, "BlinkLed", 1024 * 4, NULL, 1, NULL);
@@ -1276,12 +1357,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
       //xTaskCreate(&hid_demo_task, "hid_task", 4096, NULL, 5, NULL);
     }
 
-
-
-
-
-
-     vTaskDelay(pdMS_TO_TICKS(1000));
+     vTaskDelay(pdMS_TO_TICKS(100));
 
 
 
@@ -1290,7 +1366,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
   /**
    * \brief Start LVGL demo.
    */
-  //BG_EN(1);
+  BG_EN(1);
   lv_init();
   lvgl_driver_init();
   lv_port_fs_init();
@@ -1299,12 +1375,12 @@ vTaskDelay(pdMS_TO_TICKS(100));
       heap_caps_malloc(DISP_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA);
   assert(buf1 != NULL);
   /* Use double buffered when not working with monochrome displays */
-#ifndef CONFIG_LV_TFT_DISPLAY_MONOCHROME
-  lv_color_t *buf2 = heap_caps_malloc(DISP_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA);
-  assert(buf2 != NULL);
-#else
+// #ifndef CONFIG_LV_TFT_DISPLAY_MONOCHROME
+//   lv_color_t *buf2 = heap_caps_malloc(DISP_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA);
+//   assert(buf2 != NULL);
+// #else
   static lv_color_t *buf2 = NULL;
-#endif
+// #endif
   static lv_disp_draw_buf_t disp_buf;
   uint32_t size_in_px = DISP_BUF_SIZE;
   lv_disp_draw_buf_init(&disp_buf, buf1, buf2, size_in_px);
@@ -1313,6 +1389,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
   disp_drv.hor_res = CONFIG_LV_HOR_RES_MAX;
   disp_drv.ver_res = CONFIG_LV_VER_RES_MAX;
   disp_drv.flush_cb = disp_driver_flush;
+  disp_drv.rotated = 3;
   disp_drv.draw_buf = &disp_buf;
   lv_disp_drv_register(&disp_drv);
 
@@ -1387,7 +1464,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
   while (1) {
     ESP_LOGI(__FILENAME__, "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
 
-    vTaskDelay(pdMS_TO_TICKS(10000));
 
     // 更新开机时间显示
     uptime_seconds++;
@@ -1395,20 +1471,15 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
         char nus_data[30] = "";
         sprintf((char*)nus_data, "%02X:%02X:%02X:%02X:%02X:%02X %lu", macAddr[0], macAddr[1],macAddr[2],macAddr[3],macAddr[4],macAddr[5], uptime_seconds);
-        // 检查notify是否已启用
-        if (notifyEN()) {
-        esp_err_t ret = nus_uart_send_data(hid_conn_id, (uint8_t*)nus_data, strlen((char*)nus_data));
-            if (ret == ESP_OK) {
-                ESP_LOGI("HIDtask", "NUS data sent successfully");
-            } else {
-                ESP_LOGE("HIDtask", "NUS data send failed: %s", esp_err_to_name(ret));
-            }
-        }
+            //nus_uart_send_data(hid_conn_id, (uint8_t*)nus_data, strlen((char*)nus_data));
+            send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
         lv_label_set_text_fmt(top_label, nus_data);
     }
     
     lv_tick_inc(100);
     lv_task_handler();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
   }
 
 
