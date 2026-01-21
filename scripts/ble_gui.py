@@ -37,12 +37,14 @@ def checksum16(data: bytes) -> bytes:
 class BLEConnectionManager:
     """BLE连接管理器"""
 
-    def __init__(self, log_callback=None):
+    def __init__(self, log_callback=None, disconnect_callback=None):
         self.client = None
         self.device = None
         self.is_connected = False
         self.rx_characteristic = None
         self.log_callback = log_callback
+        self.disconnect_callback = disconnect_callback  # 断开连接回调
+        self.monitoring_task = None  # 连接监控任务
 
     def log(self, message):
         """记录日志"""
@@ -141,6 +143,10 @@ class BLEConnectionManager:
             self.log("\n正在获取服务列表...")
             await self.list_services()
             success = await self.configure_rx_characteristic()
+
+            if success:
+                # 启动连接监控任务
+                self.monitoring_task = asyncio.create_task(self._monitor_connection())
 
             return success
 
@@ -392,14 +398,52 @@ class BLEConnectionManager:
         frame = bytes([0xD2]) + checksum + packet_num_bytes + length_byte + payload
         return frame
 
+    async def _monitor_connection(self):
+        """监控连接状态"""
+        try:
+            while self.is_connected and self.client and self.client.is_connected:
+                await asyncio.sleep(2.0)  # 每2秒检查一次
+
+            # 如果循环退出，说明连接已断开
+            if self.is_connected:
+                self.log(f"\n⚠ 检测到设备断开连接!")
+                self.log(f"  连接状态: {self.client.is_connected if self.client else 'None'}")
+                self.is_connected = False
+                self.client = None
+
+                # 调用断开回调
+                if self.disconnect_callback:
+                    self.disconnect_callback()
+
+        except asyncio.CancelledError:
+            # 任务被取消（正常断开时）
+            pass
+        except Exception as e:
+            self.log(f"✗ 连接监控异常: {e}")
+            self.is_connected = False
+            self.client = None
+
+            # 调用断开回调
+            if self.disconnect_callback:
+                self.disconnect_callback()
+
     async def disconnect(self):
         """断开当前连接"""
+        # 取消监控任务
+        if self.monitoring_task and not self.monitoring_task.done():
+            self.monitoring_task.cancel()
+            try:
+                await self.monitoring_task
+            except asyncio.CancelledError:
+                pass
+            self.monitoring_task = None
+
         if self.client and self.client.is_connected:
             self.log(f"\n正在断开连接...")
             try:
                 await self.client.stop_notify(par_tx_characteristic)
-            except:
-                pass
+            except Exception as e:
+                self.log(f"  停止通知时出现异常（可忽略）: {e}")
 
             try:
                 await self.client.disconnect()
@@ -573,7 +617,10 @@ class BLEGUI:
 
         def connect_task():
             async def do_connect():
-                self.manager = BLEConnectionManager(log_callback=self.log)
+                self.manager = BLEConnectionManager(
+                    log_callback=self.log,
+                    disconnect_callback=self.on_disconnect
+                )
                 success = await self.manager.connect_device(address)
                 if success:
                     self.root.after(0, lambda: self.update_connection_state(True))
@@ -608,6 +655,12 @@ class BLEGUI:
             self.disconnect_btn.config(state=tk.DISABLED)
             self.scan_btn.config(state=tk.NORMAL)
             self.address_entry.config(state=tk.NORMAL)
+
+    def on_disconnect(self):
+        """设备断开回调"""
+        # 在主线程中更新UI
+        self.root.after(0, lambda: self.update_connection_state(False))
+        self.root.after(0, lambda: self.log("\n⚠ 设备已断开连接，请重新连接后再操作"))
 
     def send_format(self):
         """发送格式化命令"""

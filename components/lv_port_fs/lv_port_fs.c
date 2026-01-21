@@ -501,17 +501,17 @@ char* lv_port_fs_get_dir_content(const char * path)
 
         if (stat(fullpath, &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
-                offset += snprintf(result + offset, 2048 - offset, "[DIR]  %s/\n", ent->d_name);
+                offset += snprintf(result + offset, 2048 - offset, "\n[DIR]  %s/", ent->d_name);
                 dir_count++;
             } else {
-                offset += snprintf(result + offset, 2048 - offset, "[FILE] %s (%ld bytes)\n", ent->d_name, st.st_size);
+                offset += snprintf(result + offset, 2048 - offset, "\n[FILE] %s (%ld bytes)", ent->d_name, st.st_size);
                 file_count++;
             }
         }
     }
     closedir(dir);
 
-    offset += snprintf(result + offset, 2048 - offset, "Total: %d files, %d directories", file_count, dir_count);
+    offset += snprintf(result + offset, 2048 - offset, "\nTotal: %d files, %d directories\n", file_count, dir_count);
 
     return result;
 }

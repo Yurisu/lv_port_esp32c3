@@ -56,6 +56,9 @@
 #define CMD_FORMAT_LEN           7     // 格式化命令长度
 #define CMD_DIR_LEN             4     // 列出目录命令长度
 #define CMD_RESET_LEN           6     // 重启命令长度
+// 系统参数命令定义
+#define CMD_SET_PARAM          0xA1  // 设置系统参数
+#define CMD_GET_PARAM          0xA2  // 获取系统参数
 #define MAX_FILENAME_LEN        64
 #define MAX_FILE_SIZE           1024 * 1024  // 最大1MB
 
@@ -63,6 +66,17 @@
 #define APP_ID_STATUS           0x01  // 状态信息（MAC地址、运行时间等）
 #define APP_ID_DELETE           0xD4  // 删除文件响应
 #define APP_ID_SYSTEM           0xEE  // 系统命令响应（格式化、列出目录、重启等）
+#define APP_ID_SYS_PARAM        0xA0  // 系统参数响应
+
+// 系统参数键定义
+#define NVS_NAMESPACE           "SYS"   // 系统参数命名空间
+#define NVS_KEY_RUN_INTERVAL    "run_interval"     // 运行间隙
+#define NVS_KEY_BACKLIGHT       "backlight"         // 背光开关
+#define NVS_KEY_BG_MODE         "bg_mode"           // 底图模式
+#define NVS_KEY_SHOW_MAC        "show_mac"          // 显示mac
+#define NVS_KEY_POS_LABEL_EN    "pos_label_en"      // 位置标签开关
+#define NVS_KEY_POS_LABEL_X    "pos_label_x"       // 位置标签x
+#define NVS_KEY_POS_LABEL_Y    "pos_label_y"       // 位置标签y
 
 // 协议状态枚举
 typedef enum {
@@ -93,6 +107,30 @@ static image_transfer_protocol_t g_img_protocol = {
     .transfer_error = false
 };
 
+// 系统参数结构
+typedef struct {
+    uint16_t run_interval;        // 运行间隙（秒），范围1~600
+    uint8_t backlight_enable;     // 背光开关：0=关闭, 1=开启
+    uint8_t bg_image_mode;       // 底图模式：1=1张128*128, 0=2张128*64
+    uint8_t show_mac;            // 显示mac：0=关闭, 1=开启
+    uint8_t pos_label_enable;     // 位置标签：0=关闭, 1=开启
+    uint8_t pos_label_x;         // 位置标签x：0~128
+    uint8_t pos_label_y;         // 位置标签y：0~128
+} system_params_t;
+
+// 系统参数全局变量（默认值）
+static system_params_t g_sys_params = {
+    .run_interval = 1,           // 默认1秒
+    .backlight_enable = 1,        // 默认开启
+    .bg_image_mode = 1,           // 默认1张128*128
+    .show_mac = 1,              // 默认显示
+    .pos_label_enable = 1,     // 默认1
+    .pos_label_x = 36,            // 默认0
+    .pos_label_y = 100             // 默认0
+};
+
+
+
 // Checksum16 计算函数 (大端序)
 static uint16_t checksum16(const uint8_t *data, uint16_t len) {
     uint16_t sum = 0;
@@ -120,9 +158,16 @@ static void process_protocol_data(const uint8_t *data, uint16_t length);
 static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length);
 static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length);
 static esp_err_t handle_delete_frame(const uint8_t *data, uint16_t length);
+static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length);
+static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length);
+
+// 系统参数管理函数
+static void load_system_params_from_nvs(void);
+static void save_system_params_to_nvs(void);
 
 // 回传协议函数
 static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, uint16_t payload_len);
+static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *payload, uint16_t payload_len);
 
 
 // HID报告配置
@@ -209,7 +254,7 @@ const char* hidden_msg = "专业软硬件开发,方案可出何必破解,价格�
 const char* hidden_msg2 = "Professional hardware and software solutions available for purchase.[yuri_su@163.com,+8613580387577] No need to break in — let's save the effort and share the rewards. Reasonable prices, pleasant cooperation, and mutual success await.";
 
 
-// 包含 LVGL demos（如果启用了的话）
+// LVGL 
 #if LV_USE_DEMO_WIDGETS
     #include "demos/lv_demos.h"
 #endif
@@ -239,6 +284,10 @@ void BG_EN(int state);
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
 volatile bool g_task_run = false;
+
+static lv_obj_t *pos_label;
+static lv_obj_t *bg_img;
+static lv_obj_t *bom_img;
 
 // void lv_tick_task(void *arg) {
 //   (void) arg;
@@ -424,6 +473,89 @@ static void reset_protocol_state(void) {
     g_img_protocol.max_packet_num = 0;
     ESP_LOGI("CMDp", "Protocol state reset");
 }
+
+// 从NVS加载系统参数
+static void load_system_params_from_nvs(void) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    
+    if (err == ESP_OK) {
+        int val;
+        
+        // 运行间隙
+        if (nvs_get_i32(nvs_handle, NVS_KEY_RUN_INTERVAL, &val) == ESP_OK) {
+            if (val >= 1 && val <= 600) {
+                g_sys_params.run_interval = (uint16_t)val;
+            } else {
+                ESP_LOGW("SYS", "Invalid run_interval from NVS: %d, using default", val);
+            }
+        }
+        
+        // 背光开关
+        if (nvs_get_i32(nvs_handle, NVS_KEY_BACKLIGHT, &val) == ESP_OK) {
+            g_sys_params.backlight_enable = (val != 0) ? 1 : 0;
+        }
+        
+        // 底图模式
+        if (nvs_get_i32(nvs_handle, NVS_KEY_BG_MODE, &val) == ESP_OK) {
+            g_sys_params.bg_image_mode = (val == 1 || val == 0) ? (uint8_t)val : 1;
+        }
+        
+        // 显示MAC
+        if (nvs_get_i32(nvs_handle, NVS_KEY_SHOW_MAC, &val) == ESP_OK) {
+            g_sys_params.show_mac = (val != 0) ? 1 : 0;
+        }
+        
+        // 位置标签开关
+        if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_EN, &val) == ESP_OK) {
+            g_sys_params.pos_label_enable = (val != 0) ? 1 : 0;
+        }
+        
+        // 位置标签X
+        if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_X, &val) == ESP_OK) {
+            if (val >= 0 && val <= 128) {
+                g_sys_params.pos_label_x = (uint8_t)val;
+            }
+        }
+        
+        // 位置标签Y
+        if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_Y, &val) == ESP_OK) {
+            if (val >= 0 && val <= 128) {
+                g_sys_params.pos_label_y = (uint8_t)val;
+            }
+        }
+        
+        nvs_close(nvs_handle);
+        ESP_LOGI("SYS", "System parameters loaded from NVS");
+    } else {
+        ESP_LOGW("SYS", "Failed to open NVS namespace, using defaults");
+    }
+}
+
+// 保存系统参数到NVS
+static void save_system_params_to_nvs(void) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+
+    if (err == ESP_OK) {
+        nvs_set_i32(nvs_handle, NVS_KEY_RUN_INTERVAL, g_sys_params.run_interval);
+        nvs_set_i32(nvs_handle, NVS_KEY_BACKLIGHT, g_sys_params.backlight_enable);
+        nvs_set_i32(nvs_handle, NVS_KEY_BG_MODE, g_sys_params.bg_image_mode);
+        nvs_set_i32(nvs_handle, NVS_KEY_SHOW_MAC, g_sys_params.show_mac);
+        nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_EN, g_sys_params.pos_label_enable);
+        nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_X, g_sys_params.pos_label_x);
+        nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_Y, g_sys_params.pos_label_y);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+        ESP_LOGI("SYS", "System parameters saved to NVS");
+    } else {
+        ESP_LOGE("SYS", "Failed to open NVS namespace for writing");
+    }
+}
+
+
+
+
 
 // 处理初始化帧（0xD1命令）
 // 帧结构：命令(1) | checksum(2) | 文件大小(4) | 长度(1) | 文件名(N)
@@ -699,6 +831,247 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
     return ESP_OK;
 }
 
+// 处理设置参数帧（0xA1命令）
+// 帧结构：命令(1) | checksum(2) | 长度(1) | 参数(N)
+static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
+    ESP_LOGI("CMDp", "Handling set param frame, length=%d", length);
+    
+    // 最小帧长度：命令(1) + checksum(2) + 长度(1) = 4字节
+    if (length < 4) {
+        ESP_LOGE("CMDp", "Set param frame too short: %d < 4", length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    uint8_t cmd = data[0];
+    uint16_t received_checksum = be_to_u16(&data[1]);
+    uint8_t param_len = data[3];
+    
+    // 检查命令是否为0xA1
+    if (cmd != CMD_SET_PARAM) {
+        ESP_LOGE("CMDp", "Invalid set param command: 0x%02X", cmd);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 检查总长度是否匹配
+    uint16_t expected_length = 1 + 2 + 1 + param_len;
+    if (length != expected_length) {
+        ESP_LOGE("CMDp", "Length mismatch: expected %d, got %d", expected_length, length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    // 验证checksum（校验数据：长度+参数）
+    uint16_t calc_checksum = checksum16(&data[3], length - 3);
+    if (received_checksum != calc_checksum) {
+        ESP_LOGE("CMDp", "Checksum error: received=0x%04X, calculated=0x%04X",
+                 received_checksum, calc_checksum);
+        return ESP_ERR_INVALID_CRC;
+    }
+    
+    // 提取参数字符串
+    char param_str[MAX_FILENAME_LEN];
+    if (param_len >= MAX_FILENAME_LEN) {
+        param_len = MAX_FILENAME_LEN - 1;
+    }
+    memcpy(param_str, &data[4], param_len);
+    param_str[param_len] = '\0';
+    
+    ESP_LOGI("CMDp", "Set param string: %s", param_str);
+    
+    // 解析参数：key=value
+    char *equal_pos = strchr(param_str, '=');
+    if (equal_pos == NULL) {
+        ESP_LOGE("CMDp", "Invalid param format, missing '='");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 分离key和value
+    *equal_pos = '\0';  // 分割字符串
+    char *key = param_str;
+    char *value = equal_pos + 1;
+    
+    bool param_changed = false;
+    
+    // 根据key设置对应的参数
+    if (strcmp(key, "run_interval") == 0) {
+        int val = atoi(value);
+        if (val >= 1 && val <= 600) {
+            g_sys_params.run_interval = (uint16_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid run_interval value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "backlight") == 0) {
+        int val = atoi(value);
+        if (val == 0 || val == 1) {
+            g_sys_params.backlight_enable = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid backlight value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "bg_mode") == 0) {
+        int val = atoi(value);
+        if (val == 0 || val == 1) {
+            g_sys_params.bg_image_mode = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid bg_mode value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "show_mac") == 0) {
+        int val = atoi(value);
+        if (val == 0 || val == 1) {
+            g_sys_params.show_mac = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid show_mac value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "pos_label") == 0) {
+        int val = atoi(value);
+        if (val == 0 || val == 1) {
+            g_sys_params.pos_label_enable = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid pos_label value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "pos_label_x") == 0) {
+        int val = atoi(value);
+        if (val >= 0 && val <= 128) {
+            g_sys_params.pos_label_x = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid pos_label_x value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "pos_label_y") == 0) {
+        int val = atoi(value);
+        if (val >= 0 && val <= 128) {
+            g_sys_params.pos_label_y = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid pos_label_y value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else {
+        ESP_LOGE("CMDp", "Unknown parameter key: %s", key);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (param_changed) {
+        // 保存到NVS并应用
+        save_system_params_to_nvs();
+
+        // 发送成功响应
+        char response[128];
+        int key_len = strlen(key);
+        int available_space = sizeof(response) - 8; // 减去 "Set OK: " 的长度
+        if (key_len > available_space) {
+            key_len = available_space;
+        }
+        snprintf(response, sizeof(response), "Set OK: %.*s", key_len, key);
+        send_upload_response(APP_ID_SYS_PARAM, (uint8_t*)response, strlen(response));
+        ESP_LOGI("CMDp", "Parameter set successfully: %s", key);
+    }
+    
+    return ESP_OK;
+}
+
+// 处理获取参数帧（0xA2命令）
+// 帧结构：命令(1) | checksum(2) | 长度(1) | 参数(N)
+static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
+    ESP_LOGI("CMDp", "Handling get param frame, length=%d", length);
+    
+    // 最小帧长度：命令(1) + checksum(2) + 长度(1) = 4字节
+    if (length < 4) {
+        ESP_LOGE("CMDp", "Get param frame too short: %d < 4", length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    uint8_t cmd = data[0];
+    uint16_t received_checksum = be_to_u16(&data[1]);
+    uint8_t param_len = data[3];
+    
+    // 检查命令是否为0xA2
+    if (cmd != CMD_GET_PARAM) {
+        ESP_LOGE("CMDp", "Invalid get param command: 0x%02X", cmd);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 检查总长度是否匹配
+    uint16_t expected_length = 1 + 2 + 1 + param_len;
+    if (length != expected_length) {
+        ESP_LOGE("CMDp", "Length mismatch: expected %d, got %d", expected_length, length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    // 验证checksum（校验数据：长度+参数）
+    uint16_t calc_checksum = checksum16(&data[3], length - 3);
+    if (received_checksum != calc_checksum) {
+        ESP_LOGE("CMDp", "Checksum error: received=0x%04X, calculated=0x%04X",
+                 received_checksum, calc_checksum);
+        return ESP_ERR_INVALID_CRC;
+    }
+    
+    // 提取参数key
+    char key_str[32];
+    if (param_len >= sizeof(key_str)) {
+        param_len = sizeof(key_str) - 1;
+    }
+    memcpy(key_str, &data[4], param_len);
+    key_str[param_len] = '\0';
+    
+    ESP_LOGI("CMDp", "Get param key: %s", key_str);
+    
+    // 构建响应值
+    char response[128];
+    const char *value = "";
+    
+    // 根据key获取对应的值
+    if (strcmp(key_str, "run_interval") == 0) {
+        snprintf(response, sizeof(response), "run_interval=%d", g_sys_params.run_interval);
+    }
+    else if (strcmp(key_str, "backlight") == 0) {
+        snprintf(response, sizeof(response), "backlight=%d", g_sys_params.backlight_enable);
+    }
+    else if (strcmp(key_str, "bg_mode") == 0) {
+        snprintf(response, sizeof(response), "bg_mode=%d", g_sys_params.bg_image_mode);
+    }
+    else if (strcmp(key_str, "show_mac") == 0) {
+        snprintf(response, sizeof(response), "show_mac=%d", g_sys_params.show_mac);
+    }
+    else if (strcmp(key_str, "pos_label") == 0) {
+        snprintf(response, sizeof(response), "pos_label=%d", g_sys_params.pos_label_enable);
+    }
+    else if (strcmp(key_str, "pos_label_x") == 0) {
+        snprintf(response, sizeof(response), "pos_label_x=%d", g_sys_params.pos_label_x);
+    }
+    else if (strcmp(key_str, "pos_label_y") == 0) {
+        snprintf(response, sizeof(response), "pos_label_y=%d", g_sys_params.pos_label_y);
+    }
+    else {
+        snprintf(response, sizeof(response), "Error: Unknown parameter key: %s", key_str);
+        ESP_LOGE("CMDp", "Unknown parameter key: %s", key_str);
+        send_upload_response(APP_ID_SYS_PARAM, (uint8_t*)response, strlen(response));
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 发送响应
+    send_upload_response(APP_ID_SYS_PARAM, (uint8_t*)response, strlen(response));
+    ESP_LOGI("CMDp", "Get param response: %s", response);
+    
+    return ESP_OK;
+}
+
 
 
 static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param)
@@ -775,9 +1148,27 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         // 清空远端设备地址
         memset(remote_bda, 0, sizeof(esp_bd_addr_t));
         ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_BLE_DISCONNECT");
+
+        // 检查是否有正在进行的文件传输
+        if (g_img_protocol.state != PROTOCOL_STATE_IDLE) {
+            ESP_LOGW("HIDevent", "Connection lost during file transfer, cleaning up...");
+            if (g_img_protocol.file_open) {
+                lv_fs_close(&g_img_protocol.file_handle);
+                g_img_protocol.file_open = false;
+                ESP_LOGW("HIDevent", "File closed due to disconnection");
+            }
+            // 重置协议状态
+            reset_protocol_state();
+        }
+
         // 等待断开完全完成后重新广播
         vTaskDelay(pdMS_TO_TICKS(100));
-        esp_ble_gap_start_advertising(&hidd_adv_params);
+        esp_err_t ret = esp_ble_gap_start_advertising(&hidd_adv_params);
+        if (ret == ESP_OK) {
+            ESP_LOGI("HIDevent", "Advertising restarted successfully");
+        } else {
+            ESP_LOGE("HIDevent", "Failed to restart advertising: %s", esp_err_to_name(ret));
+        }
         break;
     }
     case ESP_HIDD_EVENT_BLE_VENDOR_REPORT_WRITE_EVT:
@@ -925,6 +1316,134 @@ static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, ui
     return ret;
 }
 
+/**
+ * @brief 分包发送回传协议响应（0xFE协议）
+ *
+ * @inputs
+ *  - app_id: 应用ID（从0x01开始）
+ *  - payload: 数据负载（应用数据）
+ *  - payload_len: 负载长度（可超过255）
+ * @outputs
+ *  - 返回 ESP_OK 成功，其他失败
+ *
+ * 帧结构：
+ * 1. 协议头：1字节，固定 0xFE
+ * 2. 应用ID：1字节，由应用赋值，从 0x01 开始
+ * 3. Checksum校验位：2字节，checksum16(长度+数据)，包含长度位和以后的所有字段
+ * 4. 数据长度位：1字节，N（N为负载字节数+2，包含总包数和当前包序号），范围1~255
+ * 5. 总包数：1字节，表示数据总共有多少个包
+ * 6. 当前包序号：1字节，从0开始，标识当前是第几个包
+ * 7. 数据负载：N-2字节，应用数据，尾帧可不足N-2字节
+ */
+static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *payload, uint16_t payload_len)
+{
+    // 检查参数
+    if (payload == NULL || payload_len == 0) {
+        ESP_LOGE("Upload", "Invalid payload parameters: payload=%p, len=%d", payload, payload_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查 notify 是否已启用
+    if (!notifyEN()) {
+        ESP_LOGE("Upload", "Notify not enabled");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 如果数据长度不超过253字节（需要给总包数和当前包序号预留2字节），直接发送
+    if (payload_len <= 253) {
+        ESP_LOGI("Upload", "Data size %d <= 253, sending directly", payload_len);
+        return send_upload_response(app_id, payload, payload_len);
+    }
+
+    // 计算分包信息
+    const uint16_t max_payload_per_packet = 253; // 每包最大数据量（255 - 2字节包头）
+    uint16_t remaining = payload_len;
+    uint16_t offset = 0;
+    uint8_t total_packets = (payload_len + max_payload_per_packet - 1) / max_payload_per_packet;
+
+    ESP_LOGI("Upload", "Fragmented send - Total: %d bytes, Packets: %d, Max per packet: %d",
+             payload_len, total_packets, max_payload_per_packet);
+
+    // 逐包发送
+    for (uint8_t packet_num = 0; packet_num < total_packets; packet_num++) {
+        uint16_t current_payload_size = (remaining > max_payload_per_packet) ?
+                                       max_payload_per_packet : remaining;
+
+        // 构建临时payload：总包数 + 当前包序号 + 数据负载
+        uint16_t temp_payload_len = 2 + current_payload_size;
+        uint8_t *temp_payload = heap_caps_malloc(temp_payload_len, MALLOC_CAP_DMA);
+
+        if (temp_payload == NULL) {
+            ESP_LOGE("Upload", "Failed to allocate memory for packet %d", packet_num);
+            return ESP_ERR_NO_MEM;
+        }
+
+        temp_payload[0] = total_packets;      // 总包数
+        temp_payload[1] = packet_num;         // 当前包序号
+        memcpy(&temp_payload[2], &payload[offset], current_payload_size);
+
+        // 构建帧：协议头(1) + 应用ID(1) + checksum(2) + 长度(1) + temp_payload(N)
+        uint16_t frame_size = 1 + 1 + 2 + 1 + temp_payload_len;
+        uint8_t *frame = heap_caps_malloc(frame_size, MALLOC_CAP_DMA);
+
+        if (frame == NULL) {
+            ESP_LOGE("Upload", "Failed to allocate memory for frame %d", packet_num);
+            heap_caps_free(temp_payload);
+            return ESP_ERR_NO_MEM;
+        }
+
+        // 1. 协议头：0xFE
+        frame[0] = 0xFE;
+
+        // 2. 应用ID
+        frame[1] = app_id;
+
+        // 3. 数据长度位（包含总包数和当前包序号）
+        frame[4] = (uint8_t)temp_payload_len;
+
+        // 4. 数据负载（总包数 + 当前包序号 + 实际数据）
+        memcpy(&frame[5], temp_payload, temp_payload_len);
+
+        // 5. Checksum校验位（校验：数据长度位 + 数据负载）
+        uint16_t checksum = 0;
+        for (uint16_t i = 0; i < 1 + temp_payload_len; i++) {
+            checksum += frame[4 + i];  // 从数据长度位开始校验
+        }
+        checksum &= 0xFFFF;  // 取低16位
+
+        // 写入checksum（大端序）
+        frame[2] = (uint8_t)((checksum >> 8) & 0xFF);
+        frame[3] = (uint8_t)(checksum & 0xFF);
+
+        // 发送数据
+        esp_err_t ret = nus_uart_send_data(hid_conn_id, frame, frame_size);
+        if (ret == ESP_OK) {
+            ESP_LOGI("Upload", "Packet %d/%d sent, size: %d bytes",
+                     packet_num + 1, total_packets, frame_size);
+        } else {
+            ESP_LOGE("Upload", "Failed to send packet %d: %s",
+                     packet_num, esp_err_to_name(ret));
+            heap_caps_free(temp_payload);
+            heap_caps_free(frame);
+            return ret;
+        }
+
+        // 释放内存
+        heap_caps_free(temp_payload);
+        heap_caps_free(frame);
+
+        // 更新偏移量和剩余长度
+        offset += current_payload_size;
+        remaining -= current_payload_size;
+
+        // 包间延迟，避免发送过快导致丢包
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    ESP_LOGI("Upload", "All %d packets sent successfully", total_packets);
+    return ESP_OK;
+}
+
 // 协议数据接收入口函数
 static void process_protocol_data(const uint8_t *data, uint16_t length) {
     if (length == 0 || data == NULL) {
@@ -964,6 +1483,20 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                 ESP_LOGE("CMDp", "Failed to handle delete frame");
             }
             break;
+        //0xA1
+        case CMD_SET_PARAM:
+            // 处理设置系统参数命令
+            if (handle_set_param_frame(data, length) != ESP_OK) {
+                ESP_LOGE("CMDp", "Failed to handle set param frame");
+            }
+            break;
+        //0xA2
+        case CMD_GET_PARAM:
+            // 处理获取系统参数命令
+            if (handle_get_param_frame(data, length) != ESP_OK) {
+                ESP_LOGE("CMDp", "Failed to handle get param frame");
+            }
+            break;
         //0xEE - 系统命令
         case CMD_SYS_PREFIX:
             if (length >= 2) {
@@ -989,7 +1522,7 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                     char *dir_content = lv_port_fs_get_dir_content("/");
                     if (dir_content) {
                             //nus_uart_send_data(hid_conn_id, (uint8_t*)dir_content, strlen(dir_content));
-                            send_upload_response(APP_ID_SYSTEM, (uint8_t*)dir_content, strlen(dir_content));
+                            send_upload_response_fragmented(APP_ID_SYSTEM, (uint8_t*)dir_content, strlen(dir_content));
                         free(dir_content);
                     } else {
                         const char *error_msg = "Error: Failed to get directory content";
@@ -1106,6 +1639,8 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
             // if(SI523_write_NTAG(12, cardpid) == MI_OK){
             //   ESP_LOGI(MMC_TAG, "NTAG write successful");
             // }
+            
+            if(g_sys_params.pos_label_enable) lv_label_set_text(pos_label, (const char*)cardpid);
         }}
     }
 
@@ -1215,6 +1750,8 @@ _Noreturn void app_main(void) {
   npd_gpio_init();
   gpio_interrupt_init();
 
+
+
   // 自动创建任务，按键触发
   //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
@@ -1303,6 +1840,19 @@ _Noreturn void app_main(void) {
                 }
             }
         }
+          // 加载系统参数
+    load_system_params_from_nvs();
+
+
+    ESP_LOGI("SYS", "Backlight: %s", g_sys_params.backlight_enable ? "ON" : "OFF");
+    
+    ESP_LOGI("SYS", "Run interval: %d seconds", g_sys_params.run_interval);
+    ESP_LOGI("SYS", "BG mode: %s", g_sys_params.bg_image_mode == 1 ? "128*128" : "128*64");
+    ESP_LOGI("SYS", "Show MAC: %s", g_sys_params.show_mac ? "ON" : "OFF");
+
+
+
+
 
 vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -1382,7 +1932,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
   /**
    * \brief Start LVGL demo.
    */
-  BG_EN(1);
   lv_init();
   lvgl_driver_init();
   lv_port_fs_init();
@@ -1441,19 +1990,22 @@ vTaskDelay(pdMS_TO_TICKS(100));
   //   }
   // #endif
 
+
+
+
     // 创建全屏背景图片 (128*128)
-    static lv_obj_t *bg_img;
     bg_img = lv_img_create(lv_scr_act());
     lv_img_set_src(bg_img, "A:/t-1.sjpg");
     lv_obj_set_size(bg_img, LV_HOR_RES, LV_VER_RES);
     lv_obj_center(bg_img);
 
-    // 创建上层图片 (64*128) 显示在右侧
-    static lv_obj_t *bom_img;
-    bom_img = lv_img_create(lv_scr_act());
-    lv_img_set_src(bom_img, "A:/b-1.sjpg");
-    lv_obj_set_size(bom_img, 128, 64);
-    lv_obj_align(bom_img, LV_ALIGN_TOP_LEFT, 0, 64);
+    if(g_sys_params.pos_label_enable) {
+        // 创建上层图片 (64*128) 显示
+        bom_img = lv_img_create(lv_scr_act());
+        lv_img_set_src(bom_img, "A:/b-1.sjpg");
+        lv_obj_set_size(bom_img, 128, 64);
+        lv_obj_align(bom_img, LV_ALIGN_TOP_LEFT, 0, 64);
+    }
 
     // 创建top标签
     static lv_obj_t *top_label;
@@ -1464,15 +2016,22 @@ vTaskDelay(pdMS_TO_TICKS(100));
     lv_obj_align(top_label, LV_ALIGN_TOP_MID, 0, 0);
 
     // 创建信息标签
-    static lv_obj_t *bom_label;
-    bom_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(bom_label, "4444");
-    lv_obj_set_style_text_color(bom_label, lv_color_black(), 0);
-    lv_obj_set_style_text_font(bom_label, &lv_font_montserrat_14, 0);
-    lv_obj_align(bom_label, LV_ALIGN_TOP_MID, 36, 100);
+    pos_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(pos_label, "4444");
+    lv_obj_set_style_text_color(pos_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
+    if(g_sys_params.pos_label_enable) {
+        lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
+        ESP_LOGI("SYS", "Pos label: %s at (%d, %d)", 
+             g_sys_params.pos_label_enable ? "ON" : "OFF",
+             g_sys_params.pos_label_x, g_sys_params.pos_label_y);
+    } else {
+        lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x+128, g_sys_params.pos_label_y);
+    }
 
 
-
+    // 背光控制
+    BG_EN(g_sys_params.backlight_enable);
 
 
   uint32_t uptime_seconds = 0;
