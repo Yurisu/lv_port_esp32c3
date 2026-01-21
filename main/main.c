@@ -131,6 +131,7 @@ static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, ui
 #define HIDD_DEVICE_NAME      "VSchess-"
 char blerename[32];
 uint8_t macAddr[6]; //蓝牙地址
+static esp_bd_addr_t remote_bda = {0};  // 存储远端设备地址
 
 static uint16_t hid_conn_id = 0;
 static bool sec_conn = false;
@@ -727,8 +728,19 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         hid_conn_id = param->connect.conn_id;
         sec_conn = true;
 
+        // 保存远端设备地址
+        memcpy(remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+
         // 等待连接稳定后再更新参数
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // 读取RSSI值
+        esp_err_t rssi_ret = esp_ble_gap_read_rssi(param->connect.remote_bda);
+        if (rssi_ret == ESP_OK) {
+            ESP_LOGI("HIDevent", "Reading RSSI...");
+        } else {
+            ESP_LOGE("HIDevent", "Failed to read RSSI: %s", esp_err_to_name(rssi_ret));
+        }
 
         // 先设置MTU为470
         esp_err_t mtu_ret = esp_ble_gatt_set_local_mtu(470);
@@ -760,6 +772,8 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
     {
         sec_conn = false;
         hid_conn_id = 0;
+        // 清空远端设备地址
+        memset(remote_bda, 0, sizeof(esp_bd_addr_t));
         ESP_LOGI("HIDevent", "ESP_HIDD_EVENT_BLE_DISCONNECT");
         // 等待断开完全完成后重新广播
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -822,6 +836,9 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             ESP_LOGE("GAPevent", "fail reason = 0x%x", param->ble_security.auth_cmpl.fail_reason);
         }
         break;
+    case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT:
+        ESP_LOGI("GAPevent", "RSSI = %d dBm", param->read_rssi_cmpl.rssi);
+        break;
     default:
         break;
     }
@@ -846,7 +863,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
  */
 static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, uint16_t payload_len)
 {
-    ESP_LOGI("Upload", "Sending upload response - AppID: 0x%02X, Payload: %d bytes", app_id, payload_len);
+    //ESP_LOGI("Upload", "Sending upload response - AppID: 0x%02X, Payload: %d bytes", app_id, payload_len);
 
     // 检查参数
     if (payload == NULL || payload_len == 0 || payload_len > 255) {
@@ -894,13 +911,12 @@ static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, ui
     frame[2] = (uint8_t)((checksum >> 8) & 0xFF);
     frame[3] = (uint8_t)(checksum & 0xFF);
 
-    ESP_LOG_BUFFER_HEX("Upload", frame, frame_size);
+    //ESP_LOG_BUFFER_HEX("Upload", frame, frame_size);
 
     // 发送数据
     esp_err_t ret = nus_uart_send_data(hid_conn_id, frame, frame_size);
-
     if (ret == ESP_OK) {
-        ESP_LOGI("Upload", "Upload response sent successfully, frame size: %d bytes", frame_size);
+        ESP_LOGI("Upload", "Upload success, APPID: 0x%02X, size: %d bytes", app_id, frame_size);
     } else {
         ESP_LOGE("Upload", "Failed to send upload response: %s", esp_err_to_name(ret));
     }
@@ -1462,17 +1478,26 @@ vTaskDelay(pdMS_TO_TICKS(100));
   uint32_t uptime_seconds = 0;
 
   while (1) {
-    ESP_LOGI(__FILENAME__, "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
+    ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
 
+    // 定期读取RSSI值（仅在已连接时）
+    if (hid_conn_id != 0) {
+        esp_err_t rssi_ret = esp_ble_gap_read_rssi(remote_bda);
+        if (rssi_ret != ESP_OK) {
+            ESP_LOGW("app_main", "Failed to read RSSI: %s", esp_err_to_name(rssi_ret));
+        }
+        // RSSI值会在ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT事件中打印
+    }
 
     // 更新开机时间显示
     uptime_seconds++;
     if (top_label != NULL) {
 
-        char nus_data[30] = "";
-        sprintf((char*)nus_data, "%02X:%02X:%02X:%02X:%02X:%02X %lu", macAddr[0], macAddr[1],macAddr[2],macAddr[3],macAddr[4],macAddr[5], uptime_seconds);
-            //nus_uart_send_data(hid_conn_id, (uint8_t*)nus_data, strlen((char*)nus_data));
-            send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
+        char nus_data[32] = "";  // 增加缓冲区大小以避免溢出
+        snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu",
+                 macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5], uptime_seconds);
+        //nus_uart_send_data(hid_conn_id, (uint8_t*)nus_data, strlen((char*)nus_data));
+        send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
         lv_label_set_text_fmt(top_label, nus_data);
     }
     
@@ -1484,7 +1509,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
   free(buf1);
-  free(buf2);
+  // buf2 is NULL, no need to free
   vTaskDelete(NULL);
 }
 

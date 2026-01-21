@@ -56,20 +56,36 @@ class BLEConnectionManager:
         self.log(f"{'='*60}")
 
         try:
-            devices = await BleakScanner.discover(timeout=scan_duration)
+            # 使用回调函数扫描设备，避免 FutureWarning
+            found_devices = {}
 
-            if not devices:
+            def detection_callback(device, advertisement_data):
+                """检测到设备时的回调"""
+                found_devices[device.address] = {
+                    'device': device,
+                    'advertisement': advertisement_data,
+                    'name': device.name or advertisement_data.local_name or "未知设备",
+                    'rssi': advertisement_data.rssi
+                }
+
+            scanner = BleakScanner(detection_callback)
+            await scanner.start()
+            await asyncio.sleep(scan_duration)
+            await scanner.stop()
+
+            if not found_devices:
                 self.log("未发现任何BLE设备!")
                 return []
 
-            self.log(f"\n发现 {len(devices)} 个BLE设备:\n")
+            self.log(f"\n发现 {len(found_devices)} 个BLE设备:\n")
             self.log(f"{'序号':<6} {'地址':<18} {'名称':<30} {'RSSI'}")
             self.log("-" * 70)
 
             device_list = []
-            for idx, device in enumerate(devices, 1):
-                name = device.name or "未知设备"
-                rssi = device.rssi or "N/A"
+            for idx, (addr, info) in enumerate(found_devices.items(), 1):
+                device = info['device']
+                name = info['name']
+                rssi = info['rssi']
                 marker = " <- 目标设备" if device.address.upper() == par_device_addr.upper() else ""
                 self.log(f"{idx:<6} {device.address:<18} {name:<30} {rssi}{marker}")
                 device_list.append({
@@ -84,6 +100,8 @@ class BLEConnectionManager:
 
         except Exception as e:
             self.log(f"✗ 扫描失败: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     async def connect_device(self, address):
@@ -271,9 +289,6 @@ class BLEConnectionManager:
             elif command_type == "reset":
                 # 重启命令：0xEE 0x72 0x65 0x73 0x65 0x74
                 data = bytearray([0xEE, 0x72, 0x65, 0x73, 0x65, 0x74])
-            elif command_type == "reboot":
-                # 单字节重启命令：0xEE 0xEE
-                data = bytearray([0xEE, 0xEE])
             else:
                 self.log(f"✗ 未知命令类型: {command_type}")
                 return False
@@ -409,6 +424,7 @@ class BLEGUI:
         self.manager = None
         self.loop = None
         self.loop_thread = None
+        self.auto_scroll = True  # 自动滚动开关
 
         self.setup_ui()
 
@@ -446,7 +462,6 @@ class BLEGUI:
         ttk.Button(sys_btn_frame, text="格式化文件系统", command=self.send_format).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="列出目录", command=self.send_dir).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="重启MCU", command=self.send_reset).pack(side=tk.LEFT, padx=5)
-        ttk.Button(sys_btn_frame, text="快速重启 (0xEE)", command=self.send_reboot).pack(side=tk.LEFT, padx=5)
 
         # 文件操作面板
         file_frame = ttk.LabelFrame(self.root, text="文件操作", padding=10)
@@ -477,8 +492,15 @@ class BLEGUI:
         self.log_text = scrolledtext.ScrolledText(log_frame, height=20, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        # 清空日志按钮
-        ttk.Button(log_frame, text="清空日志", command=self.clear_log).pack(anchor=tk.E)
+        # 日志控制按钮
+        control_btn_frame = ttk.Frame(log_frame)
+        control_btn_frame.pack(anchor=tk.E)
+
+        ttk.Checkbutton(control_btn_frame, text="自动滚动", 
+                      variable=self.create_var_auto_scroll(),
+                      command=self.toggle_auto_scroll).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_btn_frame, text="清空日志", 
+                  command=self.clear_log).pack(side=tk.LEFT, padx=5)
 
         # 初始化事件循环
         self.start_event_loop()
@@ -499,12 +521,23 @@ class BLEGUI:
     def log(self, message):
         """记录日志到UI"""
         self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
+        if self.auto_scroll:
+            self.log_text.see(tk.END)
         self.root.update()
 
     def clear_log(self):
         """清空日志"""
         self.log_text.delete(1.0, tk.END)
+
+    def create_var_auto_scroll(self):
+        """创建自动滚动变量"""
+        import tkinter as tk
+        self.auto_scroll_var = tk.BooleanVar(value=True)
+        return self.auto_scroll_var
+
+    def toggle_auto_scroll(self):
+        """切换自动滚动状态"""
+        self.auto_scroll = self.auto_scroll_var.get()
 
     def run_async(self, coro):
         """在事件循环中运行异步任务"""
@@ -612,21 +645,6 @@ class BLEGUI:
             async def do_reset():
                 await self.manager.send_system_command("reset")
             self.run_async(do_reset())
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def send_reboot(self):
-        """发送快速重启命令"""
-        if not self.check_connected():
-            return
-
-        if not messagebox.askyesno("确认", "确定要重启MCU吗?"):
-            return
-
-        def task():
-            async def do_reboot():
-                await self.manager.send_system_command("reboot")
-            self.run_async(do_reboot())
 
         threading.Thread(target=task, daemon=True).start()
 
