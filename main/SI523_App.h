@@ -197,6 +197,7 @@ struct SI523_context_t {
 typedef struct SI523_context_t *SI523_handle_t;
 
 void SI523_Init(i2c_master_bus_handle_t master_handle);
+esp_err_t SI523_Deinit(void);
 esp_err_t SI523_IIC_Init(i2c_master_bus_handle_t master_handle, const SI523_config_t *SI523_config, SI523_handle_t *SI523_handle);
 
 void I_SI523_IO_Write(unsigned char RegAddr, unsigned char value);

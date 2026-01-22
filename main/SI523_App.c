@@ -179,15 +179,45 @@ void SI523_Init(i2c_master_bus_handle_t master_handle)
     /* Initialize SI523 with default configuration */
     SI523_config_t si523_config = I2C_SI523_CONFIG_DEFAULT;
     SI523_handle_t si523_handle = NULL;
-    
+
     esp_err_t ret = SI523_IIC_Init(master_handle, &si523_config, &si523_handle);
-    
+
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SI523_IIC_Init failed: %s", esp_err_to_name(ret));
         return;
     }
-    
+
     ESP_LOGI(TAG, "SI523 initialized successfully at address 0x%02x", si523_config.i2c_address);
+}
+
+/////////////////////////////////////////////////////////////////////
+//功    能：释放SI523设备资源
+//返    回: ESP_OK on success
+////////////////////////////////////////////////////////////////////
+esp_err_t SI523_Deinit(void)
+{
+    /* validate global handle */
+    if (g_si523_handle == NULL) {
+        ESP_LOGE(TAG, "SI523 handle not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* remove device from i2c master bus */
+    if (g_si523_handle->i2c_handle != NULL) {
+        esp_err_t ret = i2c_master_bus_rm_device(g_si523_handle->i2c_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to remove SI523 from I2C bus: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    /* free handle memory */
+    free(g_si523_handle);
+    g_si523_handle = NULL;
+
+    ESP_LOGI(TAG, "SI523 deinitialized successfully");
+
+    return ESP_OK;
 }
 
 
@@ -841,7 +871,7 @@ char PCD_SI523_TypeA_GetUID(void)
 	if(PcdAnticoll(UID, PICC_ANTICOLL1)!= MI_OK) 
 	{
 		ESP_LOGD(TAG, "Anticoll1 failed");
-		return 1;		
+		return 1;
 	}
 	else
 	{
@@ -849,7 +879,7 @@ char PCD_SI523_TypeA_GetUID(void)
 		if(PcdSelect1(UID,&SAK)!= MI_OK)
 		{
 			ESP_LOGD(TAG, "Select1 failed");
-			return 1;		
+			return 1;
 		}
 		else
 		{
@@ -865,14 +895,14 @@ char PCD_SI523_TypeA_GetUID(void)
 					if(PcdAnticoll(UID+4, PICC_ANTICOLL2)!= MI_OK) 
 					{
 						ESP_LOGD(TAG, "Anticoll2 failed");
-						return 1;		
+						return 1;
 					}
 					else
 					{
 						if(PcdSelect2(UID+4,&SAK)!= MI_OK)  
 						{
 							ESP_LOGD(TAG, "Select2 failed");
-							return 1;		
+							return 1;
 						}
 						else
 						{
@@ -888,21 +918,21 @@ char PCD_SI523_TypeA_GetUID(void)
 									if(PcdAnticoll(UID+8, PICC_ANTICOLL3)!= MI_OK) 
 									{
 										ESP_LOGD(TAG, "Anticoll3 failed");
-										return 1;		
+										return 1;
 									}
 									else
 									{
 										if(PcdSelect3(UID+8,&SAK)!= MI_OK)  
 										{
 											ESP_LOGD(TAG, "Select3 failed");
-											return 1;		
+											return 1;
 										}
 										else
 										{
 											ESP_LOGD(TAG, "Select3 ok: SAK=%02X", SAK);
 											if(SAK&0x04)                          
 											{
-												//UID_complate3 = 0;
+												//UID_complate3
 											}
 											else 
 											{

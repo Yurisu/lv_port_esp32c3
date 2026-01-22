@@ -22,6 +22,7 @@
 #include "esp_sleep.h"
 #include "sys/time.h"
 #include "nvs_flash.h"
+#include "driver/temperature_sensor.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -58,6 +59,7 @@
 #define CMD_FORMAT_LEN           7     // 格式化命令长度
 #define CMD_DIR_LEN             4     // 列出目录命令长度
 #define CMD_RESET_LEN           6     // 重启命令长度
+#define CMD_NFC_LEN             4     // NFC触发命令长度
 // 系统参数命令定义
 #define CMD_SET_PARAM          0xA1  // 设置系统参数
 #define CMD_GET_PARAM          0xA2  // 获取系统参数
@@ -72,6 +74,7 @@
 
 // 系统参数键定义
 #define NVS_NAMESPACE           "SYS"   // 系统参数命名空间
+#define NVS_KEY_COMP_OFFSET    "comp_offset"       // 指南针偏移
 #define NVS_KEY_RUN_INTERVAL    "run_interval"     // 运行间隙
 #define NVS_KEY_BACKLIGHT       "backlight"         // 背光开关
 #define NVS_KEY_BG_MODE         "bg_mode"           // 底图模式
@@ -82,6 +85,23 @@
 #define NVS_KEY_HEARTBEAT      "heartbeat"         // 心跳包开关
 #define NVS_KEY_IMG1_FILE      "img1_file"        // 图1文件名
 #define NVS_KEY_IMG2_FILE      "img2_file"        // 图2文件名
+#define NVS_KEY_ROLE_NAME      "role_name"         // 角色名称
+#define NVS_KEY_ROLE_TYPE      "role_type"         // 角色类型
+#define NVS_KEY_ROLE_ACTION    "role_action"       // 行动类型
+
+#define BATTERY_REPORT_ID 0x02
+#define BATTERY_REPORT_SIZE 1
+#define HIDD_DEVICE_NAME      "VSchess-"
+
+
+#define I2C0_MASTER_PORT               I2C_NUM_0
+#define I2C0_MASTER_SDA_IO             GPIO_NUM_9
+#define I2C0_MASTER_SCL_IO             GPIO_NUM_8 
+#define NPD_EN_GPIO                    GPIO_NUM_10
+#define LED_BG_GPIO                    GPIO_NUM_6
+#define BATTERY_ADC                    GPIO_NUM_3
+
+#define GPIO_INTERRUPT_PIN             GPIO_NUM_21
 
 // 协议状态枚举
 typedef enum {
@@ -114,6 +134,7 @@ static image_transfer_protocol_t g_img_protocol = {
 
 // 系统参数结构
 typedef struct {
+    uint16_t comp_offset;          // 指南针偏移：0~360
     uint16_t run_interval;        // 运行间隙（秒），范围1~600
     uint8_t backlight_enable;     // 背光开关：0=关闭, 1=开启
     uint8_t bg_image_mode;       // 底图模式：1=1张128*128, 0=2张128*64
@@ -124,10 +145,14 @@ typedef struct {
     uint8_t heartbeat_enable;      // 心跳包：0=关闭, 1=开启
     char img1_file[20];         // 图1显示图片文件名（长度<20
     char img2_file[20];         // 图2显示图片文件名（长度<20）
+    char role_name[20];         // 角色名称（长度<20）
+    uint8_t role_type;          // 角色类型：0~255
+    uint8_t role_action;        // 行动类型：0~255
 } system_params_t;
 
 // 系统参数全局变量（默认值）
 static system_params_t g_sys_params = {
+    .comp_offset = 0,              // 默认0度偏移
     .run_interval = 1000,           // 默认1秒
     .backlight_enable = 1,        // 默认开启
     .bg_image_mode = 1,           // 默认1张128*128
@@ -137,7 +162,10 @@ static system_params_t g_sys_params = {
     .pos_label_y = 100,           // 默认
     .heartbeat_enable = 1,          // 默认开启心跳包
     .img1_file = "t-3.jpg",      // 默认图1文件名
-    .img2_file = "b-3.jpg"       // 默认图2文件名
+    .img2_file = "b-3.jpg",       // 默认图2文件名
+    .role_name = "default",        // 默认角色名称
+    .role_type = 0,              // 默认角色类型
+    .role_action = 0             // 默认行动类型
 };
 
 
@@ -176,15 +204,18 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length);
 static void load_system_params_from_nvs(void);
 static void save_system_params_to_nvs(void);
 
+// 触发测量任务函数
+static esp_err_t start_measure_task(void);
+
 // 回传协议函数
 static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, uint16_t payload_len);
 static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *payload, uint16_t payload_len);
 
+void i2c0_mmc56x3_task( void *pvParameters );
+void key_task( void *pvParameters );
 
 // HID报告配置
-#define BATTERY_REPORT_ID 0x02
-#define BATTERY_REPORT_SIZE 1
-#define HIDD_DEVICE_NAME      "VSchess-"
+
 char blerename[32];
 uint8_t macAddr[6]; //蓝牙地址
 static esp_bd_addr_t remote_bda = {0};  // 存储远端设备地址
@@ -224,6 +255,8 @@ static esp_ble_adv_params_t hidd_adv_params = {
 //nfc
 #include "mmc56x3.h"
 #include "SI523_App.h"
+int Compass_Heading = 0;
+int True_Heading = 0;
 
 //ws2812
 #include "driver/rmt_tx.h"
@@ -239,6 +272,9 @@ uint8_t led_brightness= 100;
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
+
+static adc_oneshot_unit_handle_t adc1_handle;
+
 struct capacity {
   int capacity;
   int minx;
@@ -261,6 +297,100 @@ static struct capacity battery_capacity_tables[] = {
   {100, 4120, 4240}, //3
 };
 
+#define NO_OF_SAMPLES 64  // 多次采样取平均值
+#define ADC_ATTEN_DB 11    // 11dB衰减，最大输入电压约3.9V，配合1/2分压可测最大7.8V
+#define BATTERY_DIVIDER_RATIO 2.0  // 电池分压比，1/2分压电路
+static void adc_init(void)
+{
+    // ADC init BATTERY_ADC gpio3
+    adc_oneshot_unit_init_cfg_t init_config1 = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+    adc_oneshot_chan_cfg_t configa = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,  // 使用默认位宽（通常为12位）
+        .atten = ADC_ATTEN_DB_11,  // 11dB衰减，最大输入约3.9V
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, BATTERY_ADC, &configa));
+}
+
+static uint32_t read_battery_voltage(void)
+{
+    int raw = 0;
+    uint32_t adc_reading = 0;
+    esp_err_t ret = ESP_OK;
+
+    // 多次采样取平均值，提高准确性
+    for (int i = 0; i < NO_OF_SAMPLES; i++)
+    {
+        ret = adc_oneshot_read(adc1_handle, BATTERY_ADC, &raw);
+        if (ret == ESP_OK)
+        {
+            adc_reading += raw;
+        }
+        else
+        {
+            ESP_LOGE("ADC", "ADC read failed: %s", esp_err_to_name(ret));
+            i = 0;
+            adc_reading = 0;
+        }
+    }
+    adc_reading /= NO_OF_SAMPLES;
+
+    // ESP32C3 ADC转换公式（11dB衰减）
+    // 实际电压(mV) = ADC原始值 * 分压系数 * 1000 / (2^12 - 1)
+    // 分压系数 = 2.0（因为1/2分压电路）
+    // 2^12 = 4096
+    uint32_t adc_voltage_mv = (uint32_t)(adc_reading * 2520.0 / 3495 * BATTERY_DIVIDER_RATIO);
+
+    ESP_LOGD("ADC", "ADC raw=%lu, battery_voltage=%lumV", adc_reading, adc_voltage_mv);
+
+    return adc_voltage_mv;
+}
+static int battery_calculate_capacity(int battery_voltage)
+{
+    int mid = 0;
+    int high = battery_capacity_tables_size - 1;
+    int low = 0;
+    int offset = 0;
+    int cap = 0;
+    int v0 = 0;
+    int c0 = 0;
+    int v1 = 0;
+    int c1 = 0;
+    int deviation = 0;
+
+    while (high >= low)
+    {
+        mid = (high + low) / 2;
+        // offset = (compensated ? tables[mid].offset : 0);
+        if ((battery_voltage + offset) < battery_capacity_tables[mid].minx)
+            high = mid - 1;
+        else if ((battery_voltage + offset) > battery_capacity_tables[mid].maxx)
+            low = mid + 1;
+        else
+            break;
+    }
+
+    cap = battery_capacity_tables[mid].capacity;
+    if ((0 < mid) && (mid < battery_capacity_tables_size - 1))
+    {
+        v0 = battery_capacity_tables[mid].minx;
+        c0 = battery_capacity_tables[mid].capacity;
+        v1 = battery_capacity_tables[mid + 1].minx;
+        c1 = battery_capacity_tables[mid + 1].capacity;
+
+        deviation = ((c1 - c0) * (battery_voltage - v0) * 10) / (v1 - v0);
+        cap = c0 + (deviation / 10 + ((deviation % 10) >= 5 ? 1 : 0));
+        if (cap < c0)
+            cap = c0;
+        else if (cap > c1)
+            cap = c1;
+    }
+
+    return cap;
+}
+
 const char* hidden_msg = "专业软硬件开发,方案可出何必破解,价格合理,合作愉快,期待共赢, yuri_su@163.com , +8613580387577  ";
 const char* hidden_msg2 = "Professional hardware and software solutions available for purchase.[yuri_su@163.com,+8613580387577] No need to break in — let's save the effort and share the rewards. Reasonable prices, pleasant cooperation, and mutual success await.";
 
@@ -270,31 +400,29 @@ const char* hidden_msg2 = "Professional hardware and software solutions availabl
     #include "demos/lv_demos.h"
 #endif
 
-#define I2C0_MASTER_PORT               I2C_NUM_0
-#define I2C0_MASTER_SDA_IO             GPIO_NUM_9
-#define I2C0_MASTER_SCL_IO             GPIO_NUM_8 
-#define NPD_EN_GPIO                    GPIO_NUM_10
-#define LED_BG_GPIO                    GPIO_NUM_6
-#define BATTERY_ADC                    GPIO_NUM_3
-
-#define GPIO_INTERRUPT_PIN             GPIO_NUM_21
 #define GPIO_INTERRUPT_TAG             "GPIO_ISR"
 
 
 #define TSK_MINIMAL_STACK_SIZE         (1024)
 #define MMC_TASK_NAME                 "mmc_task"
 #define MMC_TASK_SAMPLING_RATE        (10000) 
-#define MMC_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 8)
+#define MMC_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 2)
 #define MMC_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
-#define MMC_TAG                         "MMC[APP]"
+#define MMC_TAG                       "MMC"
 
+
+#define KEY_TASK_NAME                 "key_task"
+#define KEY_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 2)
+#define KEY_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
+#define KEY_TAG                       "KEY"
 
 void NPD_EN(int state);
 void BG_EN(int state);
 
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
-volatile bool g_task_run = false;
+
+static volatile bool g_task_running = false;  // 任务运行标志，防止重复创建
 
 static lv_obj_t *pos_label;
 static lv_obj_t *bg_img;
@@ -342,40 +470,6 @@ _Noreturn void PrintChipInfo(void *params) {
   }
 }
 
-// _Noreturn void BlinkLed(void *params) {
-//   (void) params;
-//   uint8_t level = LOW_LEVEL;
-//   gpio_reset_pin(LED_4);
-//   gpio_set_direction(LED_4, GPIO_MODE_OUTPUT); // Set the GPIO as a push/pull output
-//   gpio_reset_pin(LED_5);
-//   gpio_set_direction(LED_5, GPIO_MODE_OUTPUT); // Set the GPIO as a push/pull output
-//   ESP_LOGI("BlinkLed", "LED configuration completed.");
-
-//   while (true) {
-//     gpio_set_level(LED_4, level);
-//     ESP_LOGI("BlinkLed", "LED_4: %s!", level == HIGH_LEVEL ? "ON" : "OFF");
-//     vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-//     level = !level;
-
-//     gpio_set_level(LED_5, level);
-//     ESP_LOGI("BlinkLed", "LED_5: %s!", level == HIGH_LEVEL ? "ON" : "OFF");
-//     vTaskDelay(1000 / portTICK_PERIOD_MS);
-//   }
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #define I2C0_MASTER_CONFIG_DEFAULT {                                \
         .clk_source                     = I2C_CLK_SRC_DEFAULT,      \
@@ -408,22 +502,17 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     uint32_t gpio_num = (uint32_t) arg;
-    
-    // Send notification to task (optional, for debouncing or complex handling)
-    // For simple logging, we can directly log here
-    if(!g_task_run) {
-        ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
-        g_task_run = true;
-    }
-    // 检查任务是否已存在，避免重复创建
-    // TaskHandle_t task_handle = xTaskGetHandle(MMC_TASK_NAME);
-    // if (task_handle == NULL) {
-    //     xTaskCreatePinnedToCore(i2c0_mmc56x3_task, MMC_TASK_NAME, MMC_TASK_STACK_SIZE, NULL, MMC_TASK_PRIORITY, NULL, 0);
-    // } else {
-    //     ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "Task %s already exists, skipping creation", MMC_TASK_NAME);
-    // }
-    
-    // Clear the interrupt status
+
+    ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
+
+    // 检查任务是否正在运行，防止重复创建
+    if (!g_task_running) {
+        g_task_running = true;
+        // 直接创建一次性任务来处理按键事件
+        xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
+    } 
+
+    // 清除中断状态
     gpio_intr_disable(gpio_num);
     //ets_delay_us(10); // Simple debounce
     gpio_intr_enable(gpio_num);
@@ -493,7 +582,16 @@ static void load_system_params_from_nvs(void) {
     
     if (err == ESP_OK) {
         int val;
-        
+
+        // 指南针偏移
+        if (nvs_get_i32(nvs_handle, NVS_KEY_COMP_OFFSET, &val) == ESP_OK) {
+            if (val >= 0 && val <= 360) {
+                g_sys_params.comp_offset = (uint16_t)val;
+            } else {
+                ESP_LOGW("SYS", "Invalid comp_offset from NVS: %d, using default", val);
+            }
+        }
+
         // 运行间隙
         if (nvs_get_i32(nvs_handle, NVS_KEY_RUN_INTERVAL, &val) == ESP_OK) {
             if (val >= 10 && val <= 60000) {
@@ -564,6 +662,35 @@ static void load_system_params_from_nvs(void) {
             }
         }
 
+        // 角色名称
+        required_size = 20;
+        if (nvs_get_str(nvs_handle, NVS_KEY_ROLE_NAME, g_sys_params.role_name, &required_size) != ESP_OK) {
+            ESP_LOGW("SYS", "No role_name in NVS, using default");
+        } else {
+            if (required_size >= 20) {
+                ESP_LOGW("SYS", "role_name too long, truncating");
+                g_sys_params.role_name[19] = '\0';
+            }
+        }
+
+        // 角色类型
+        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLE_TYPE, &val) == ESP_OK) {
+            if (val >= 0 && val <= 255) {
+                g_sys_params.role_type = (uint8_t)val;
+            } else {
+                ESP_LOGW("SYS", "Invalid role_type from NVS: %d, using default", val);
+            }
+        }
+
+        // 行动类型
+        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLE_ACTION, &val) == ESP_OK) {
+            if (val >= 0 && val <= 255) {
+                g_sys_params.role_action = (uint8_t)val;
+            } else {
+                ESP_LOGW("SYS", "Invalid role_action from NVS: %d, using default", val);
+            }
+        }
+
         nvs_close(nvs_handle);
         ESP_LOGI("SYS", "System parameters loaded from NVS");
     } else {
@@ -577,6 +704,7 @@ static void save_system_params_to_nvs(void) {
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
 
     if (err == ESP_OK) {
+        nvs_set_i32(nvs_handle, NVS_KEY_COMP_OFFSET, g_sys_params.comp_offset);
         nvs_set_i32(nvs_handle, NVS_KEY_RUN_INTERVAL, g_sys_params.run_interval);
         nvs_set_i32(nvs_handle, NVS_KEY_BACKLIGHT, g_sys_params.backlight_enable);
         nvs_set_i32(nvs_handle, NVS_KEY_BG_MODE, g_sys_params.bg_image_mode);
@@ -587,6 +715,9 @@ static void save_system_params_to_nvs(void) {
         nvs_set_i32(nvs_handle, NVS_KEY_HEARTBEAT, g_sys_params.heartbeat_enable);
         nvs_set_str(nvs_handle, NVS_KEY_IMG1_FILE, g_sys_params.img1_file);
         nvs_set_str(nvs_handle, NVS_KEY_IMG2_FILE, g_sys_params.img2_file);
+        nvs_set_str(nvs_handle, NVS_KEY_ROLE_NAME, g_sys_params.role_name);
+        nvs_set_i32(nvs_handle, NVS_KEY_ROLE_TYPE, g_sys_params.role_type);
+        nvs_set_i32(nvs_handle, NVS_KEY_ROLE_ACTION, g_sys_params.role_action);
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
         ESP_LOGI("SYS", "System parameters saved to NVS");
@@ -595,9 +726,34 @@ static void save_system_params_to_nvs(void) {
     }
 }
 
+// 触发测量任务（等同于按键中断中的任务）
+static esp_err_t start_measure_task(void)
+{
+    // 检查任务是否正在运行，防止重复创建
+    if (g_task_running) {
+        ESP_LOGW("CMDp", "Measure task already running");
+        const char *warning_msg = "Error: Task already running";
+        send_upload_response(APP_ID_SYSTEM, (uint8_t*)warning_msg, strlen(warning_msg));
+        return ESP_ERR_INVALID_STATE;
+    }
 
+    // 创建一次性任务来处理按键事件（等同于按键中断）
+    g_task_running = true;
+    BaseType_t ret = xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
 
-
+    if (ret == pdPASS) {
+        const char *success_msg = "Key task started";
+        send_upload_response(APP_ID_SYSTEM, (uint8_t*)success_msg, strlen(success_msg));
+        ESP_LOGI("CMDp", "Key task created successfully");
+        return ESP_OK;
+    } else {
+        g_task_running = false;  // 创建失败，重置标志
+        const char *error_msg = "Error: Failed to create task";
+        send_upload_response(APP_ID_SYSTEM, (uint8_t*)error_msg, strlen(error_msg));
+        ESP_LOGE("CMDp", "Failed to create key task");
+        return ESP_FAIL;
+    }
+}
 
 // 处理初始化帧（0xD1命令）
 // 帧结构：命令(1) | checksum(2) | 文件大小(4) | 长度(1) | 文件名(N)
@@ -932,9 +1088,19 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
     char *value = equal_pos + 1;
     
     bool param_changed = false;
-    
+
     // 根据key设置对应的参数
-    if (strcmp(key, "run_interval") == 0) {
+    if (strcmp(key, "comp_offset") == 0) {
+        int val = atoi(value);
+        if (val >= 0 && val <= 360) {
+            g_sys_params.comp_offset = (uint16_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid comp_offset value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "run_interval") == 0) {
         int val = atoi(value);
         if (val >= 10 && val <= 60000) {
             g_sys_params.run_interval = (uint16_t)val;
@@ -1031,6 +1197,36 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             param_changed = true;
         } else {
             ESP_LOGE("CMDp", "Invalid img2_file value: %s (length=%d)", value, (int)strlen(value));
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "role_name") == 0) {
+        if (strlen(value) > 0 && strlen(value) < 20) {
+            strncpy(g_sys_params.role_name, value, 19);
+            g_sys_params.role_name[19] = '\0';
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid role_name value: %s (length=%d)", value, (int)strlen(value));
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "role_type") == 0) {
+        int val = atoi(value);
+        if (val >= 0 && val <= 255) {
+            g_sys_params.role_type = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid role_type value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "role_action") == 0) {
+        int val = atoi(value);
+        if (val >= 0 && val <= 255) {
+            g_sys_params.role_action = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid role_action value: %d", val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1138,6 +1334,19 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     }
     else if (strcmp(key_str, "img2_file") == 0) {
         snprintf(response, sizeof(response), "img2_file=%s", g_sys_params.img2_file);
+    }
+    else if (strcmp(key_str, "role_name") == 0) {
+        snprintf(response, sizeof(response), "role_name=%s", g_sys_params.role_name);
+    }
+    else if (strcmp(key_str, "role_type") == 0) {
+        snprintf(response, sizeof(response), "role_type=%d", g_sys_params.role_type);
+    }
+    else if (strcmp(key_str, "role_action") == 0) {
+        snprintf(response, sizeof(response), "role_action=%d", g_sys_params.role_action);
+    }
+    else if (strcmp(key_str, "Comp") == 0) {
+        // Comp 是只读参数，返回当前指南针方向
+        snprintf(response, sizeof(response), "Comp=%d", Compass_Heading);
     }
     else {
         snprintf(response, sizeof(response), "Error: Unknown parameter key: %s", key_str);
@@ -1345,7 +1554,7 @@ static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, ui
 
     // 检查 notify 是否已启用
     if (!notifyEN()) {
-        ESP_LOGE("Upload", "Notify not enabled");
+        ESP_LOGD("Upload", "Notify not enabled");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1624,6 +1833,12 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
 
                     esp_restart();
                 }
+                // NFC触发命令：0xEE 0x4E 0x46 0x43 ("NFC")
+                else if (length == CMD_NFC_LEN &&
+                         data[1] == 0x4E && data[2] == 0x46 && data[3] == 0x43) {
+                    ESP_LOGI("CMDp", "NFC trigger command received");
+                    start_measure_task();
+                }
                 else {
                     ESP_LOGW("CMDp", "Unknown system command, length=%d", length);
                 }
@@ -1638,138 +1853,14 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
     }
 }
 
-void hid_demo_task(void *pvParameters)
-{
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    while (1)
-    {
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
-            
-        if (sec_conn)
-        {
-            sec_conn=0;
-            ESP_LOGI("HIDtask", "Send the volume");
-            send_volum_up = true;
-            // uint8_t key_vaule = {HID_KEY_A};
-            // esp_hidd_send_keyboard_value(hid_conn_id, 0, &key_vaule, 1);
-            esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_UP, true);
-            
-            
-            
-            vTaskDelay(3000 / portTICK_PERIOD_MS);
-            if (send_volum_up)
-            {
-                send_volum_up = false;
-                esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_UP, false);
-                esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_DOWN, true);
-                vTaskDelay(3000 / portTICK_PERIOD_MS);
-                esp_hidd_send_consumer_value(hid_conn_id, HID_CONSUMER_VOLUME_DOWN, false);
-            }
-        }
-    }
-}
 
 
-void i2c0_mmc56x3_task( void *pvParameters ) {
-    // initialize the xLastWakeTime variable with the current time.
-    TickType_t         last_wake_time  = xTaskGetTickCount ();
-    // initialize i2c device configuration
-    mmc56x3_config_t dev_cfg       = I2C_MMC56X3_CONFIG_DEFAULT;
-    mmc56x3_handle_t dev_hdl;
-    //
-    int status = 10;
-    unsigned char carduid[10];
-    unsigned char cardpid[16];
-    
-    // 初始状态：保持下电
-    NPD_EN(0);
-
-  while (1)
-  {
-    g_task_run = false;
-    while (!g_task_run) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    // 按键触发，开始上电初始化
-    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
-    
-    // 上电并等待模块稳定
-    NPD_EN(1);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    // 初始化SI523
-    SI523_Init(i2c0_bus_hdl);
-    vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms让SI523初始化完成
 
 
-    status = 10;
-    // task loop entry point - 只执行一次测量
-    for(int i = 0; i < status; i++) {    
-        if(SI523_CheckVer() != 0){
-        PCD_SI523_TypeA_Init();
-        //PCD_SI523_TypeA();
-        if(PCD_SI523_TypeA_GetUID()==0){
-            if(SI523_read_NTAG(12, cardpid) == MI_OK){
-            ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
-            break;
-            }
-            // if(SI523_write_YURIDATA() == MI_OK){
-            //   ESP_LOGI(MMC_TAG, "YURIDATA write successful");
-            // }
-            // memccpy(cardpid, "9876", 4, 4);
-            // if(SI523_write_NTAG(12, cardpid) == MI_OK){
-            //   ESP_LOGI(MMC_TAG, "NTAG write successful");
-            // }
-            
-            if(g_sys_params.pos_label_enable) lv_label_set_text(pos_label, (const char*)cardpid);
-        }}
-    }
 
-    status = 10;
-    // task loop entry point - 只执行一次测量
-    for(int i = 0; i < status; i++) {
-        
-        // 初始化MMC56X3
-        mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
-        if (dev_hdl == NULL) {
-            ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
-            vTaskDelay(pdMS_TO_TICKS(200));
-            //发送复位命令
-            mmc56x3_reset(i2c0_bus_hdl);
-            assert(dev_hdl);
-        }
-        else
-        {
-        //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
-        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
-        mmc56x3_magnetic_axes_data_t magnetic_axes;
-        esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
-        if(result != ESP_OK) {
-            ESP_LOGE(MMC_TAG, "mmc56x3 device read failed (%s)", esp_err_to_name(result));
-        } else {
-            //ESP_LOGI(MMC_TAG, "Compass X-Axis:  %f mG", magnetic_axes.x_axis);
-            //ESP_LOGI(MMC_TAG, "Compass Y-Axis:  %f mG", magnetic_axes.y_axis);
-            //ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
-            //ESP_LOGI(MMC_TAG, "Compass Heading: %f °", mmc56x3_convert_to_heading(magnetic_axes));
-            ESP_LOGI(MMC_TAG, "True Heading:    %d °", (int)(mmc56x3_convert_to_true_heading(dev_hdl->dev_config.declination, magnetic_axes)));
-            // 成功读取一次数据后退出循环
-            break;
-        }
-        }
-        //
-        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
-    }
-    
-    // 测量完成，下电节省电量
-    ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
-    NPD_EN(0);
-  }
-    //
-    // free resources
-    mmc56x3_delete( dev_hdl );
-    ESP_LOGI(MMC_TAG, "Task i2c0_mmc56x3_task completed");
-    vTaskDelete( NULL );
-}
+
+
+
 
 
 
@@ -1830,14 +1921,14 @@ _Noreturn void app_main(void) {
   IIC_init();
   npd_gpio_init();
   gpio_interrupt_init();
-
+  adc_init();  // 初始化ADC，用于读取电池电压
+  BG_EN(0);
 
 
   // 自动创建任务，按键触发
-  //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+  xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
-  //xTaskCreate(BlinkLed, "BlinkLed", 1024 * 4, NULL, 1, NULL);
   fflush(stdout);
   {
     TaskHandle_t print_chip_info_handle = xTaskGetHandle("PrintChipInfo");
@@ -1849,19 +1940,6 @@ _Noreturn void app_main(void) {
   // while (1) {
      vTaskDelay(pdMS_TO_TICKS(100));
   // }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     esp_err_t ret;
 
@@ -1923,12 +2001,6 @@ _Noreturn void app_main(void) {
         }
           // 加载系统参数
     load_system_params_from_nvs();
-
-
-    
-    ESP_LOGI("SYS", "Run interval: %d seconds", g_sys_params.run_interval);
-    ESP_LOGI("SYS", "BG mode: %s", g_sys_params.bg_image_mode == 1 ? "128*128" : "128*64");
-    ESP_LOGI("SYS", "Show MAC: %s", g_sys_params.show_mac ? "ON" : "OFF");
 
 
 
@@ -2000,7 +2072,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
       esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
       esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 
-      //xTaskCreate(&hid_demo_task, "hid_task", 4096, NULL, 5, NULL);
     }
 
      vTaskDelay(pdMS_TO_TICKS(100));
@@ -2072,6 +2143,11 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
 
+    
+    ESP_LOGI("SYS", "Run interval: %d seconds", g_sys_params.run_interval);
+    ESP_LOGI("SYS", "BG mode: %s", g_sys_params.bg_image_mode == 1 ? "128*128" : "128*64");
+
+
 
     // 创建全屏背景图片 (128*128)
     bg_img = lv_img_create(lv_scr_act());
@@ -2120,12 +2196,23 @@ vTaskDelay(pdMS_TO_TICKS(100));
     }
 
 
+    temperature_sensor_handle_t temp_handle = NULL;
+    temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 50);
+    ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_handle));
+
+
   // 背光控制
   BG_EN(g_sys_params.backlight_enable);
-
-
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
+    // 启用温度传感器
+    ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
+    // 获取传输的传感器数据
+    float tsens_out;
+    ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
+    //ESP_LOGI("app_main", "Free Heap Size: %f", tsens_out);
+    // 温度传感器使用完毕后，禁用温度传感器，节约功耗
+    ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
 
     // 定期读取RSSI值（仅在已连接时）
     if (hid_conn_id != 0) {
@@ -2136,14 +2223,19 @@ vTaskDelay(pdMS_TO_TICKS(100));
         // RSSI值会在ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT事件中打印
     }
 
+    // 读取电池电压并计算电量
+    uint32_t battery_voltage_mv = read_battery_voltage();
+    int battery_capacity = battery_calculate_capacity(battery_voltage_mv);
+
     if(g_sys_params.show_mac || g_sys_params.heartbeat_enable) {
     // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
     struct timeval tv_now;
     gettimeofday(&tv_now, NULL);
     uint32_t uptime_seconds = (uint32_t)tv_now.tv_sec;
-        char nus_data[32] = "";  // 增加缓冲区大小以避免溢出
-            snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu",
-                    macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5], uptime_seconds);
+        char nus_data[64] = "";  // 增加缓冲区大小以包含电池信息
+            snprintf((char*)nus_data, sizeof(nus_data), "%02X%02X%02X%02X%02X%02X %d%% %lu",
+                    macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
+                    battery_capacity,uptime_seconds);
         if(g_sys_params.show_mac) {
             lv_label_set_text_fmt(top_label, nus_data);
             lv_obj_clear_flag(top_label, LV_OBJ_FLAG_HIDDEN);
@@ -2152,9 +2244,13 @@ vTaskDelay(pdMS_TO_TICKS(100));
         }
         // 根据heartbeat参数决定是否发送心跳包
         if (g_sys_params.heartbeat_enable) {
+            snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu %lu %d%% %f",
+                macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
+                uptime_seconds, battery_voltage_mv, battery_capacity, tsens_out);
             send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
-        }    
+        }
     }
+    
     lv_tick_inc(100);
     lv_task_handler();
     vTaskDelay(pdMS_TO_TICKS(g_sys_params.run_interval));
@@ -2170,3 +2266,131 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void i2c0_mmc56x3_task( void *pvParameters ) {
+    // initialize i2c device configuration
+    mmc56x3_config_t dev_cfg       = I2C_MMC56X3_CONFIG_DEFAULT;
+    mmc56x3_handle_t dev_hdl;
+    //
+    int status = 5;
+        for(int i = 0; i < status; i++) {
+            // 初始化MMC56X3
+            mmc56x3_init(i2c0_bus_hdl, &dev_cfg, &dev_hdl);
+            if (dev_hdl == NULL) {
+                ESP_LOGE(MMC_TAG, "mmc56x3 handle init failed");
+                vTaskDelay(pdMS_TO_TICKS(200));
+                //发送复位命令
+                mmc56x3_reset(i2c0_bus_hdl);
+                assert(dev_hdl);
+            }
+                //mmc56x3_set_measure_mode(i2c0_bus_hdl, dev_hdl, false);
+
+                //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - START #########################");
+                mmc56x3_magnetic_axes_data_t magnetic_axes;
+                esp_err_t result = mmc56x3_get_magnetic_axes(dev_hdl, &magnetic_axes);
+                if(result != ESP_OK) {
+                    ESP_LOGE(MMC_TAG, "mmc56x3 device read failed (%s)", esp_err_to_name(result));
+                } else {
+                    //ESP_LOGI(MMC_TAG, "Compass X-Axis:  %f mG", magnetic_axes.x_axis);
+                    //ESP_LOGI(MMC_TAG, "Compass Y-Axis:  %f mG", magnetic_axes.y_axis);
+                    //ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
+                    Compass_Heading = (int)(mmc56x3_convert_to_heading(magnetic_axes));
+                    ESP_LOGI(MMC_TAG, "Compass Heading: %d °", Compass_Heading);
+                    True_Heading = (int)(mmc56x3_convert_to_true_heading((float)g_sys_params.comp_offset, magnetic_axes));
+                    ESP_LOGI(MMC_TAG, "True Heading:    %d °", True_Heading);
+                    // 成功读取一次数据后退出循环
+                    break;
+                }
+        //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
+        vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    
+
+    // 释放MMC56X3资源
+    mmc56x3_delete( dev_hdl );
+    ESP_LOGI(MMC_TAG, "Task i2c0_mmc56x3_task completed");
+
+
+    vTaskDelete( NULL );
+}
+
+void key_task( void *pvParameters )
+{
+    (void)pvParameters;
+int status = 5;
+    unsigned char carduid[10];
+    unsigned char cardpid[16];
+
+    // 按键触发，开始上电初始化
+    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
+    xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+
+
+
+
+
+    // 上电并等待模块稳定
+    NPD_EN(1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    // 初始化SI523
+    SI523_Init(i2c0_bus_hdl);
+    vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms让SI523初始化完成
+
+    for(int i = 0; i < status; i++) {    
+        if(SI523_CheckVer() != 0){
+        PCD_SI523_TypeA_Init();
+        //PCD_SI523_TypeA();
+        if(PCD_SI523_TypeA_GetUID()==0){
+            if(SI523_read_NTAG(12, cardpid) == MI_OK){
+            ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
+            break;
+            }
+            // if(SI523_write_YURIDATA() == MI_OK){
+            //   ESP_LOGI(MMC_TAG, "YURIDATA write successful");
+            // }
+            // memccpy(cardpid, "9876", 4, 4);
+            // if(SI523_write_NTAG(12, cardpid) == MI_OK){
+            //   ESP_LOGI(MMC_TAG, "NTAG write successful");
+            // }
+            
+            if(g_sys_params.pos_label_enable) lv_label_set_text(pos_label, (const char*)cardpid);
+        }}
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+
+
+
+    //Compass_Heading True_Heading
+
+
+    // 测量完成，下电节省电量
+    ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
+
+    // 释放SI523设备资源
+    SI523_Deinit();
+    vTaskDelay(pdMS_TO_TICKS(10));
+    NPD_EN(0);
+    
+    // 清除任务运行标志，允许创建新任务
+    g_task_running = false;
+
+    vTaskDelete( NULL );
+}

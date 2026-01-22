@@ -751,7 +751,7 @@ float mmc56x3_convert_to_true_heading(const float declination, const mmc56x3_mag
     
     /* 标准指南针角度计算公式 - 参考CSDN文章 */
     /* 角度 = atan2(Y轴磁场, X轴磁场) × (180/π) + 180 + 地磁偏角 */
-    heading = atan2f(axes_data.y_axis, axes_data.x_axis) * 180.0f / M_PI + 180.0f + declination;
+    heading = atan2f(axes_data.y_axis, axes_data.x_axis) * 180.0f / M_PI + 180.0f - declination;
     
     /* 确保角度在0-360度范围内 */
     if(heading < 0.0f) heading += 360.0f;
