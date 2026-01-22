@@ -19,6 +19,8 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_sleep.h"
+#include "sys/time.h"
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
@@ -59,7 +61,7 @@
 // 系统参数命令定义
 #define CMD_SET_PARAM          0xA1  // 设置系统参数
 #define CMD_GET_PARAM          0xA2  // 获取系统参数
-#define MAX_FILENAME_LEN        64
+#define MAX_FILENAME_LEN        20
 #define MAX_FILE_SIZE           1024 * 1024  // 最大1MB
 
 // 回传协议应用ID定义（从0x01开始）
@@ -77,6 +79,9 @@
 #define NVS_KEY_POS_LABEL_EN    "pos_label_en"      // 位置标签开关
 #define NVS_KEY_POS_LABEL_X    "pos_label_x"       // 位置标签x
 #define NVS_KEY_POS_LABEL_Y    "pos_label_y"       // 位置标签y
+#define NVS_KEY_HEARTBEAT      "heartbeat"         // 心跳包开关
+#define NVS_KEY_IMG1_FILE      "img1_file"        // 图1文件名
+#define NVS_KEY_IMG2_FILE      "img2_file"        // 图2文件名
 
 // 协议状态枚举
 typedef enum {
@@ -116,17 +121,23 @@ typedef struct {
     uint8_t pos_label_enable;     // 位置标签：0=关闭, 1=开启
     uint8_t pos_label_x;         // 位置标签x：0~128
     uint8_t pos_label_y;         // 位置标签y：0~128
+    uint8_t heartbeat_enable;      // 心跳包：0=关闭, 1=开启
+    char img1_file[20];         // 图1显示图片文件名（长度<20
+    char img2_file[20];         // 图2显示图片文件名（长度<20）
 } system_params_t;
 
 // 系统参数全局变量（默认值）
 static system_params_t g_sys_params = {
-    .run_interval = 1,           // 默认1秒
+    .run_interval = 1000,           // 默认1秒
     .backlight_enable = 1,        // 默认开启
     .bg_image_mode = 1,           // 默认1张128*128
     .show_mac = 1,              // 默认显示
     .pos_label_enable = 1,     // 默认1
-    .pos_label_x = 36,            // 默认0
-    .pos_label_y = 100             // 默认0
+    .pos_label_x = 36,            // 默认
+    .pos_label_y = 100,           // 默认
+    .heartbeat_enable = 1,          // 默认开启心跳包
+    .img1_file = "t-3.jpg",      // 默认图1文件名
+    .img2_file = "b-3.jpg"       // 默认图2文件名
 };
 
 
@@ -288,6 +299,7 @@ volatile bool g_task_run = false;
 static lv_obj_t *pos_label;
 static lv_obj_t *bg_img;
 static lv_obj_t *bom_img;
+static lv_obj_t *gif_obj;
 
 // void lv_tick_task(void *arg) {
 //   (void) arg;
@@ -484,7 +496,7 @@ static void load_system_params_from_nvs(void) {
         
         // 运行间隙
         if (nvs_get_i32(nvs_handle, NVS_KEY_RUN_INTERVAL, &val) == ESP_OK) {
-            if (val >= 1 && val <= 600) {
+            if (val >= 10 && val <= 60000) {
                 g_sys_params.run_interval = (uint16_t)val;
             } else {
                 ESP_LOGW("SYS", "Invalid run_interval from NVS: %d, using default", val);
@@ -524,7 +536,34 @@ static void load_system_params_from_nvs(void) {
                 g_sys_params.pos_label_y = (uint8_t)val;
             }
         }
-        
+
+        // 心跳包开关
+        if (nvs_get_i32(nvs_handle, NVS_KEY_HEARTBEAT, &val) == ESP_OK) {
+            g_sys_params.heartbeat_enable = (val != 0) ? 1 : 0;
+        }
+
+        // 图1文件名
+        size_t required_size = 20;
+        if (nvs_get_str(nvs_handle, NVS_KEY_IMG1_FILE, g_sys_params.img1_file, &required_size) != ESP_OK) {
+            ESP_LOGW("SYS", "No img1_file in NVS, using default");
+        } else {
+            if (required_size >= 20) {
+                ESP_LOGW("SYS", "img1_file too long, truncating");
+                g_sys_params.img1_file[19] = '\0';
+            }
+        }
+
+        // 图2文件名
+        required_size = 20;
+        if (nvs_get_str(nvs_handle, NVS_KEY_IMG2_FILE, g_sys_params.img2_file, &required_size) != ESP_OK) {
+            ESP_LOGW("SYS", "No img2_file in NVS, using default");
+        } else {
+            if (required_size >= 20) {
+                ESP_LOGW("SYS", "img2_file too long, truncating");
+                g_sys_params.img2_file[19] = '\0';
+            }
+        }
+
         nvs_close(nvs_handle);
         ESP_LOGI("SYS", "System parameters loaded from NVS");
     } else {
@@ -545,6 +584,9 @@ static void save_system_params_to_nvs(void) {
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_EN, g_sys_params.pos_label_enable);
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_X, g_sys_params.pos_label_x);
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_Y, g_sys_params.pos_label_y);
+        nvs_set_i32(nvs_handle, NVS_KEY_HEARTBEAT, g_sys_params.heartbeat_enable);
+        nvs_set_str(nvs_handle, NVS_KEY_IMG1_FILE, g_sys_params.img1_file);
+        nvs_set_str(nvs_handle, NVS_KEY_IMG2_FILE, g_sys_params.img2_file);
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
         ESP_LOGI("SYS", "System parameters saved to NVS");
@@ -704,7 +746,7 @@ static esp_err_t handle_delete_frame(const uint8_t *data, uint16_t length) {
     lv_fs_res_t ret = lv_port_fs_remove(filepath);
 
     // 发送响应
-    char response[128];
+    char response[64];
     if (ret == LV_FS_RES_OK) {
         snprintf(response, sizeof(response), "Delete: OK - %s", filename);
         ESP_LOGI("CMDp", "File deleted successfully: %s", filename);
@@ -894,7 +936,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
     // 根据key设置对应的参数
     if (strcmp(key, "run_interval") == 0) {
         int val = atoi(value);
-        if (val >= 1 && val <= 600) {
+        if (val >= 10 && val <= 60000) {
             g_sys_params.run_interval = (uint16_t)val;
             param_changed = true;
         } else {
@@ -962,6 +1004,36 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             return ESP_ERR_INVALID_ARG;
         }
     }
+    else if (strcmp(key, "heartbeat") == 0) {
+        int val = atoi(value);
+        if (val == 0 || val == 1) {
+            g_sys_params.heartbeat_enable = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid heartbeat value: %d", val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "img1_file") == 0) {
+        if (strlen(value) > 0 && strlen(value) < 20) {
+            strncpy(g_sys_params.img1_file, value, 19);
+            g_sys_params.img1_file[19] = '\0';
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid img1_file value: %s (length=%d)", value, (int)strlen(value));
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "img2_file") == 0) {
+        if (strlen(value) > 0 && strlen(value) < 20) {
+            strncpy(g_sys_params.img2_file, value, 19);
+            g_sys_params.img2_file[19] = '\0';
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid img2_file value: %s (length=%d)", value, (int)strlen(value));
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
     else {
         ESP_LOGE("CMDp", "Unknown parameter key: %s", key);
         return ESP_ERR_INVALID_ARG;
@@ -972,7 +1044,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         save_system_params_to_nvs();
 
         // 发送成功响应
-        char response[128];
+        char response[64];
         int key_len = strlen(key);
         int available_space = sizeof(response) - 8; // 减去 "Set OK: " 的长度
         if (key_len > available_space) {
@@ -1033,7 +1105,7 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     ESP_LOGI("CMDp", "Get param key: %s", key_str);
     
     // 构建响应值
-    char response[128];
+    char response[64];
     const char *value = "";
     
     // 根据key获取对应的值
@@ -1057,6 +1129,15 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     }
     else if (strcmp(key_str, "pos_label_y") == 0) {
         snprintf(response, sizeof(response), "pos_label_y=%d", g_sys_params.pos_label_y);
+    }
+    else if (strcmp(key_str, "heartbeat") == 0) {
+        snprintf(response, sizeof(response), "heartbeat=%d", g_sys_params.heartbeat_enable);
+    }
+    else if (strcmp(key_str, "img1_file") == 0) {
+        snprintf(response, sizeof(response), "img1_file=%s", g_sys_params.img1_file);
+    }
+    else if (strcmp(key_str, "img2_file") == 0) {
+        snprintf(response, sizeof(response), "img2_file=%s", g_sys_params.img2_file);
     }
     else {
         snprintf(response, sizeof(response), "Error: Unknown parameter key: %s", key_str);
@@ -1508,7 +1589,7 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                     ESP_LOGI("CMDp", "Format command received");
 
                     lv_fs_res_t ret = lv_port_fs_format();
-                    char response[64];
+                    char response[24];
                     snprintf(response, sizeof(response), "Format: %s",
                              (ret == LV_FS_RES_OK) ? "OK" : "Failed");
                         //nus_uart_send_data(hid_conn_id, (uint8_t*)response, strlen(response));
@@ -1844,7 +1925,6 @@ _Noreturn void app_main(void) {
     load_system_params_from_nvs();
 
 
-    ESP_LOGI("SYS", "Backlight: %s", g_sys_params.backlight_enable ? "ON" : "OFF");
     
     ESP_LOGI("SYS", "Run interval: %d seconds", g_sys_params.run_interval);
     ESP_LOGI("SYS", "BG mode: %s", g_sys_params.bg_image_mode == 1 ? "128*128" : "128*64");
@@ -1995,17 +2075,26 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
     // 创建全屏背景图片 (128*128)
     bg_img = lv_img_create(lv_scr_act());
-    lv_img_set_src(bg_img, "A:/t-1.sjpg");
+    char bg_img_path[35];
+    snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.img1_file);
+    lv_img_set_src(bg_img, bg_img_path);
     lv_obj_set_size(bg_img, LV_HOR_RES, LV_VER_RES);
     lv_obj_center(bg_img);
 
-    if(g_sys_params.pos_label_enable) {
         // 创建上层图片 (64*128) 显示
         bom_img = lv_img_create(lv_scr_act());
-        lv_img_set_src(bom_img, "A:/b-1.sjpg");
+        char bom_img_path[35];
+        snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.img2_file);
+        lv_img_set_src(bom_img, bom_img_path);
         lv_obj_set_size(bom_img, 128, 64);
         lv_obj_align(bom_img, LV_ALIGN_TOP_LEFT, 0, 64);
-    }
+
+        // // 创建100w.gif动画显示
+        // gif_obj = lv_gif_create(lv_scr_act());
+        // lv_gif_set_src(gif_obj, "A:/100w.gif");
+        // //lv_obj_set_size(gif_obj, 80, 80);
+        // lv_obj_align(gif_obj, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    
 
     // 创建top标签
     static lv_obj_t *top_label;
@@ -2014,6 +2103,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
     lv_obj_set_style_text_color(top_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(top_label, &lv_font_montserrat_10, 0);
     lv_obj_align(top_label, LV_ALIGN_TOP_MID, 0, 0);
+    
 
     // 创建信息标签
     pos_label = lv_label_create(lv_scr_act());
@@ -2030,11 +2120,9 @@ vTaskDelay(pdMS_TO_TICKS(100));
     }
 
 
-    // 背光控制
-    BG_EN(g_sys_params.backlight_enable);
+  // 背光控制
+  BG_EN(g_sys_params.backlight_enable);
 
-
-  uint32_t uptime_seconds = 0;
 
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
@@ -2048,21 +2136,29 @@ vTaskDelay(pdMS_TO_TICKS(100));
         // RSSI值会在ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT事件中打印
     }
 
-    // 更新开机时间显示
-    uptime_seconds++;
-    if (top_label != NULL) {
-
+    if(g_sys_params.show_mac || g_sys_params.heartbeat_enable) {
+    // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
+    struct timeval tv_now;
+    gettimeofday(&tv_now, NULL);
+    uint32_t uptime_seconds = (uint32_t)tv_now.tv_sec;
         char nus_data[32] = "";  // 增加缓冲区大小以避免溢出
-        snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu",
-                 macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5], uptime_seconds);
-        //nus_uart_send_data(hid_conn_id, (uint8_t*)nus_data, strlen((char*)nus_data));
-        send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
-        lv_label_set_text_fmt(top_label, nus_data);
+            snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu",
+                    macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5], uptime_seconds);
+        if(g_sys_params.show_mac) {
+            lv_label_set_text_fmt(top_label, nus_data);
+            lv_obj_clear_flag(top_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(top_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        // 根据heartbeat参数决定是否发送心跳包
+        if (g_sys_params.heartbeat_enable) {
+            send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
+        }    
     }
-    
     lv_tick_inc(100);
     lv_task_handler();
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(g_sys_params.run_interval));
+
 
   }
 

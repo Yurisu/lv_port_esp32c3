@@ -1,4 +1,4 @@
-
+|
 # 蓝牙通信协议文档
 
 ## 一、图片传输协议（主机 → ESP32）
@@ -34,13 +34,17 @@
 
 | 参数名 | 数据类型 | 取值范围 | 说明 |
 |--------|----------|----------|------|
-| run_interval | uint16_t | 1~600 | 运行间隙（秒） |
+| run_interval | uint16_t | 10~60000 | 运行间隙（秒） |
 | backlight | uint8_t | 0或1 | 背光开关：0=关闭, 1=开启 |
 | bg_mode | uint8_t | 0或1 | 底图模式：1=1张128*128, 0=2张128*64 |
 | show_mac | uint8_t | 0或1 | 显示MAC：0=关闭, 1=开启 |
 | pos_label | uint8_t | 0或1 | 位置标签：0=关闭, 1=开启 |
 | pos_label_x | uint8_t | 0~128 | 位置标签X坐标 |
 | pos_label_y | uint8_t | 0~128 | 位置标签Y坐标 |
+| heartbeat | uint8_t | 0或1 | 心跳包：0=关闭, 1=开启 |
+| img1_file | string | 长度<20 | 图1显示图片文件名 |
+| img2_file | string | 长度<20 | 图2显示图片文件名 |
+
 
 **使用示例**：
 - 设置参数：`0xA1 + checksum + len(14) + "backlight=1"`
