@@ -53,7 +53,8 @@
 // 图片传输协议相关定义
 #define CMD_INIT_FRAME          0xD1  // 初始化帧
 #define CMD_DATA_FRAME          0xD2  // 数据帧
-#define CMD_DELETE_FRAME         0xD4  // 删除文件帧
+#define CMD_DELETE_FRAME        0xD4  // 删除文件帧
+#define CMD_WRITE_CARD_FRAME    0xB1  // 写卡帧
 // 系统命令定义（多字节命令）
 #define CMD_SYS_PREFIX          0xEE  // 系统命令前缀
 #define CMD_FORMAT_LEN           7     // 格式化命令长度
@@ -71,6 +72,7 @@
 #define APP_ID_DELETE           0xD4  // 删除文件响应
 #define APP_ID_SYSTEM           0xEE  // 系统命令响应（格式化、列出目录、重启等）
 #define APP_ID_SYS_PARAM        0xA0  // 系统参数响应
+#define APP_ID_WRITE_CARD       0xB1  // 写卡响应
 
 // 系统参数键定义
 #define NVS_NAMESPACE           "SYS"   // 系统参数命名空间
@@ -131,6 +133,12 @@ static image_transfer_protocol_t g_img_protocol = {
     .max_packet_num = 0,
     .transfer_error = false
 };
+
+// 写卡数据全局变量（16字节）
+static uint8_t g_write_card_data[16] = {0};
+
+// 指南针响应标记位（非阻塞模式）
+static bool g_compending_response = false;  // 是否有待发送的指南针响应
 
 // 系统参数结构
 typedef struct {
@@ -199,6 +207,7 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length);
 static esp_err_t handle_delete_frame(const uint8_t *data, uint16_t length);
 static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length);
 static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length);
+static esp_err_t handle_write_card_frame(const uint8_t *data, uint16_t length);
 
 // 系统参数管理函数
 static void load_system_params_from_nvs(void);
@@ -206,6 +215,7 @@ static void save_system_params_to_nvs(void);
 
 // 触发测量任务函数
 static esp_err_t start_measure_task(void);
+static esp_err_t start_write_card_task(void);
 
 // 回传协议函数
 static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, uint16_t payload_len);
@@ -213,6 +223,10 @@ static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *
 
 void i2c0_mmc56x3_task( void *pvParameters );
 void key_task( void *pvParameters );
+void writecard_task( void *pvParameters );
+
+// NFC数据处理函数
+static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data);
 
 // HID报告配置
 
@@ -309,7 +323,7 @@ static void adc_init(void)
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
     adc_oneshot_chan_cfg_t configa = {
         .bitwidth = ADC_BITWIDTH_DEFAULT,  // 使用默认位宽（通常为12位）
-        .atten = ADC_ATTEN_DB_11,  // 11dB衰减，最大输入约3.9V
+        .atten = ADC_ATTEN_DB_12,  // 11dB衰减，最大输入约3.9V
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, BATTERY_ADC, &configa));
 }
@@ -410,10 +424,9 @@ const char* hidden_msg2 = "Professional hardware and software solutions availabl
 #define MMC_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
 #define MMC_TAG                       "MMC"
 
-
 #define KEY_TASK_NAME                 "key_task"
 #define KEY_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 2)
-#define KEY_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
+#define KEY_TASK_PRIORITY             (tskIDLE_PRIORITY + 3)
 #define KEY_TAG                       "KEY"
 
 void NPD_EN(int state);
@@ -422,7 +435,7 @@ void BG_EN(int state);
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
 
-static volatile bool g_task_running = false;  // 任务运行标志，防止重复创建
+static volatile uint8_t g_task_running = 0;  // 任务运行标志，防止重复创建
 
 static lv_obj_t *pos_label;
 static lv_obj_t *bg_img;
@@ -500,14 +513,14 @@ void IIC_init(void) {
 // GPIO interrupt handler
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    //BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     uint32_t gpio_num = (uint32_t) arg;
 
     ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
 
     // 检查任务是否正在运行，防止重复创建
-    if (!g_task_running) {
-        g_task_running = true;
+    if (g_task_running == 0) {
+        g_task_running = 100;
         // 直接创建一次性任务来处理按键事件
         xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
     } 
@@ -738,7 +751,7 @@ static esp_err_t start_measure_task(void)
     }
 
     // 创建一次性任务来处理按键事件（等同于按键中断）
-    g_task_running = true;
+    g_task_running = 100;
     BaseType_t ret = xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
 
     if (ret == pdPASS) {
@@ -747,7 +760,7 @@ static esp_err_t start_measure_task(void)
         ESP_LOGI("CMDp", "Key task created successfully");
         return ESP_OK;
     } else {
-        g_task_running = false;  // 创建失败，重置标志
+        g_task_running = 0;  // 创建失败，重置标志
         const char *error_msg = "Error: Failed to create task";
         send_upload_response(APP_ID_SYSTEM, (uint8_t*)error_msg, strlen(error_msg));
         ESP_LOGE("CMDp", "Failed to create key task");
@@ -1175,6 +1188,8 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         if (val == 0 || val == 1) {
             g_sys_params.heartbeat_enable = (uint8_t)val;
             param_changed = true;
+        } else if(val == 2) {
+            g_sys_params.heartbeat_enable = (uint8_t)val;
         } else {
             ESP_LOGE("CMDp", "Invalid heartbeat value: %d", val);
             return ESP_ERR_INVALID_ARG;
@@ -1346,7 +1361,18 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     }
     else if (strcmp(key_str, "Comp") == 0) {
         // Comp 是只读参数，返回当前指南针方向
-        snprintf(response, sizeof(response), "Comp=%d", Compass_Heading);
+        if(g_task_running == 0) {
+            g_task_running=100;//超时
+            xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+            // 非阻塞方式：设置标记位，任务完成时自动发送响应
+            g_compending_response = true;
+            snprintf(response, sizeof(response), "Comp measuring...");
+            ESP_LOGI("CMDp", "Compass measurement started, response will be sent after task completes");
+        }
+        else {
+            snprintf(response, sizeof(response), "Comp busy, try later");
+            ESP_LOGI("CMDp", "Compass measurement in progress, try later");
+        }
     }
     else {
         snprintf(response, sizeof(response), "Error: Unknown parameter key: %s", key_str);
@@ -1358,11 +1384,174 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     // 发送响应
     send_upload_response(APP_ID_SYS_PARAM, (uint8_t*)response, strlen(response));
     ESP_LOGI("CMDp", "Get param response: %s", response);
-    
+
     return ESP_OK;
 }
 
+// 处理写卡帧（0xB1命令）
+// 帧结构：命令(1) | checksum(2) | 长度(1) | 数据(16)
+static esp_err_t handle_write_card_frame(const uint8_t *data, uint16_t length) {
+    ESP_LOGI("CMDp", "Handling write card frame, length=%d", length);
 
+    // 最小帧长度：命令(1) + checksum(2) + 长度(1) + 数据(16) = 20字节
+    if (length != 20) {
+        ESP_LOGE("CMDp", "Write card frame length error: expected 20, got %d", length);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t cmd = data[0];
+    uint16_t received_checksum = be_to_u16(&data[1]);
+    uint8_t data_len = data[3];
+
+    // 检查命令是否为0xB1
+    if (cmd != CMD_WRITE_CARD_FRAME) {
+        ESP_LOGE("CMDp", "Invalid write card frame command: 0x%02X", cmd);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查数据长度是否为16
+    if (data_len != 16) {
+        ESP_LOGE("CMDp", "Invalid data length: expected 16, got %d", data_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 验证checksum（校验数据：长度+数据）
+    uint16_t calc_checksum = checksum16(&data[3], length - 3);
+    if (received_checksum != calc_checksum) {
+        ESP_LOGE("CMDp", "Checksum error: received=0x%04X, calculated=0x%04X",
+                 received_checksum, calc_checksum);
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    // 保存数据到全局变量
+    memcpy(g_write_card_data, &data[4], 16);
+
+    ESP_LOGI("CMDp", "Write card data received:");
+    ESP_LOGI("CMDp", "Data(hex): %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+             g_write_card_data[0], g_write_card_data[1], g_write_card_data[2], g_write_card_data[3],
+             g_write_card_data[4], g_write_card_data[5], g_write_card_data[6], g_write_card_data[7],
+             g_write_card_data[8], g_write_card_data[9], g_write_card_data[10], g_write_card_data[11],
+             g_write_card_data[12], g_write_card_data[13], g_write_card_data[14], g_write_card_data[15]);
+
+    // 启动写卡任务
+    esp_err_t ret = start_write_card_task();
+    if (ret == ESP_OK) {
+        const char *success_msg = "Write card task started";
+        send_upload_response(APP_ID_SYSTEM, (uint8_t*)success_msg, strlen(success_msg));
+        ESP_LOGI("CMDp", "Write card task created successfully");
+    } else {
+        const char *error_msg = "Error: Failed to create write card task";
+        send_upload_response(APP_ID_SYSTEM, (uint8_t*)error_msg, strlen(error_msg));
+        ESP_LOGE("CMDp", "Failed to create write card task");
+    }
+
+    return ESP_OK;
+}
+
+// 启动写卡任务
+static esp_err_t start_write_card_task(void)
+{
+    // 检查任务是否正在运行，防止重复创建
+    if (g_task_running) {
+        ESP_LOGW("CMDp", "Write card task already running");
+        const char *warning_msg = "Error: Task already running";
+        send_upload_response(APP_ID_SYSTEM, (uint8_t*)warning_msg, strlen(warning_msg));
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 创建一次性任务来处理写卡事件
+    g_task_running = 100;
+    BaseType_t ret = xTaskCreatePinnedToCore(writecard_task, "write_card", KEY_TASK_STACK_SIZE * 2, NULL, KEY_TASK_PRIORITY, NULL, 0);
+
+    if (ret == pdPASS) {
+        ESP_LOGI("CMDp", "Write card task created successfully");
+        return ESP_OK;
+    } else {
+        g_task_running = 0;  // 创建失败，重置标志
+        ESP_LOGE("CMDp", "Failed to create write card task");
+        return ESP_FAIL;
+    }
+}
+
+// NFC数据处理函数
+// 参数：
+//       card_uid - 卡片UID（7字节）
+//       card_data - NFC卡片数据（16字节）
+static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data)
+{
+    if (card_data == NULL) {
+        ESP_LOGW("NFC", "Card data is NULL");
+        return;
+    }
+
+    uint8_t index = card_data[0];
+
+    ESP_LOGI("NFC", "Processing NFC data, index=0x%02X", index);
+
+    switch (index) 
+    {
+        case 0x31:  // 六边形坐标
+        {
+            if (True_Heading >= 0 && True_Heading <= 360) {
+                // 将指南针方向转换为六边形坐标格式
+                int hex_coord = (True_Heading * 6) / 360;
+                card_data[3] = (hex_coord >> 8) & 0xFF;  // x-high
+                card_data[4] = hex_coord & 0xFF;           // x-low
+                card_data[5] = (hex_coord >> 8) & 0xFF;  // y-high
+                card_data[6] = hex_coord & 0xFF;           // y-low
+                card_data[7] = (hex_coord >> 8) & 0xFF;  // z-high
+                card_data[8] = hex_coord & 0xFF;           // z-low
+                ESP_LOGI("NFC", "Hex coord set: %d, compass: %d", hex_coord, True_Heading);
+            }
+            break;
+        }
+
+        case 0x32:  // 角色名称
+        {
+            // 将角色名称写入card_data
+            // card_data[2]开始，最多14字节
+            memset(&card_data[2], 0, 14);
+            strncpy((char*)&card_data[2], g_sys_params.role_name, 14);
+            ESP_LOGI("NFC", "Role name written: %s", g_sys_params.role_name);
+            break;
+        }
+
+        case 0x33:  // 角色类型
+        {
+            // 将角色类型写入card_data
+            // card_data[2]开始，最多14字节
+            memset(&card_data[2], 0, 14);
+            snprintf((char*)&card_data[2], 14, "%d", g_sys_params.role_type);
+            ESP_LOGI("NFC", "Role type written: %d", g_sys_params.role_type);
+            break;
+        }
+
+        case 0x34:  // 行动类型
+        {
+            // 将行动类型写入card_data
+            // card_data[2]开始，最多14字节
+            memset(&card_data[2], 0, 14);
+            snprintf((char*)&card_data[2], 14, "%d", g_sys_params.role_action);
+            ESP_LOGI("NFC", "Role action written: %d", g_sys_params.role_action);
+            break;
+        }
+
+        case 0x11:  // 设置指南针修正方向值
+        {
+            // 格式：card_data[0]=0x11, card_data[1]=0x21, card_data[2]=0x31, {调用}
+            if(card_data[1] != 0x21 || card_data[2] != 0x31) {
+                g_sys_params.comp_offset = Compass_Heading;
+                save_system_params_to_nvs();
+                ESP_LOGI("NFC", "Compass offset set to: %d degrees", g_sys_params.comp_offset);
+            }
+            break;
+        }
+
+        default:
+            ESP_LOGW("NFC", "Unknown index: 0x%02X", index);
+            break;
+    }
+}
 
 static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param)
 {
@@ -1787,6 +1976,13 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                 ESP_LOGE("CMDp", "Failed to handle get param frame");
             }
             break;
+        //0xB1 - 写卡命令
+        case CMD_WRITE_CARD_FRAME:
+            // 处理写卡命令
+            if (handle_write_card_frame(data, length) != ESP_OK) {
+                ESP_LOGE("CMDp", "Failed to handle write card frame");
+            }
+            break;
         //0xEE - 系统命令
         case CMD_SYS_PREFIX:
             if (length >= 2) {
@@ -2105,7 +2301,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
   disp_drv.hor_res = CONFIG_LV_HOR_RES_MAX;
   disp_drv.ver_res = CONFIG_LV_VER_RES_MAX;
   disp_drv.flush_cb = disp_driver_flush;
-  disp_drv.rotated = 3;
+  disp_drv.rotated = 1;
   disp_drv.draw_buf = &disp_buf;
   lv_disp_drv_register(&disp_drv);
 
@@ -2145,7 +2341,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
     
     ESP_LOGI("SYS", "Run interval: %d seconds", g_sys_params.run_interval);
-    ESP_LOGI("SYS", "BG mode: %s", g_sys_params.bg_image_mode == 1 ? "128*128" : "128*64");
 
 
 
@@ -2157,7 +2352,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
     lv_obj_set_size(bg_img, LV_HOR_RES, LV_VER_RES);
     lv_obj_center(bg_img);
 
-        // 创建上层图片 (64*128) 显示
+        // 创建下层图片 (64*128) 显示
         bom_img = lv_img_create(lv_scr_act());
         char bom_img_path[35];
         snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.img2_file);
@@ -2175,7 +2370,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
     // 创建top标签
     static lv_obj_t *top_label;
     top_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(top_label, "Uptime: 0s");
+    lv_label_set_text(top_label, "102030405060 100%% 00000");
     lv_obj_set_style_text_color(top_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(top_label, &lv_font_montserrat_10, 0);
     lv_obj_align(top_label, LV_ALIGN_TOP_MID, 0, 0);
@@ -2201,41 +2396,87 @@ vTaskDelay(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_handle));
 
 
-  // 背光控制
-  BG_EN(g_sys_params.backlight_enable);
+
+  // 记录上次使用的图片文件名，用于检测变化
+  static char last_img1_file[20] = "";
+  static char last_img2_file[20] = "";
+  static uint8_t last_bg_image_mode = 2;  // 记录上次的显示模式，初始值为2（无效值，确保首次检查）
+
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
+
+    // 背光控制
+    BG_EN(g_sys_params.backlight_enable);
+
+    // 检查图片1文件名是否变化
+    if (strcmp(last_img1_file, g_sys_params.img1_file) != 0) {
+        strncpy(last_img1_file, g_sys_params.img1_file, 19);
+        last_img1_file[19] = '\0';
+        char bg_img_path[35];
+        snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.img1_file);
+        lv_img_set_src(bg_img, bg_img_path);
+        ESP_LOGI("app_main", "Background image updated: %s", bg_img_path);
+    }
+
+    // 检查图片2文件名是否变化
+    if (strcmp(last_img2_file, g_sys_params.img2_file) != 0) {
+        strncpy(last_img2_file, g_sys_params.img2_file, 19);
+        last_img2_file[19] = '\0';
+        char bom_img_path[35];
+        snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.img2_file);
+        lv_img_set_src(bom_img, bom_img_path);
+        ESP_LOGI("app_main", "Foreground image updated: %s", bom_img_path);
+    }
+
+    // 检查图片模式是否变化
+    if (last_bg_image_mode != g_sys_params.bg_image_mode) {
+        last_bg_image_mode = g_sys_params.bg_image_mode;
+        if (g_sys_params.bg_image_mode == 0) {
+            // 显示图片2（上层图片）
+            lv_obj_clear_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI("app_main", "Foreground image shown (mode=0)");
+        } else {
+            // 隐藏图片2（上层图片）
+            lv_obj_add_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI("app_main", "Foreground image hidden (mode=1)");
+        }
+    }
+
+    // 更新位置标签显示
+    lv_label_set_text(pos_label, g_sys_params.role_name);
+    lv_obj_set_style_text_color(pos_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
+    if(g_sys_params.pos_label_enable) {
+        lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
+        lv_obj_clear_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+
+    
     // 启用温度传感器
     ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
-    // 获取传输的传感器数据
     float tsens_out;
     ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
     //ESP_LOGI("app_main", "Free Heap Size: %f", tsens_out);
     // 温度传感器使用完毕后，禁用温度传感器，节约功耗
     ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
 
-    // 定期读取RSSI值（仅在已连接时）
-    if (hid_conn_id != 0) {
-        esp_err_t rssi_ret = esp_ble_gap_read_rssi(remote_bda);
-        if (rssi_ret != ESP_OK) {
-            ESP_LOGW("app_main", "Failed to read RSSI: %s", esp_err_to_name(rssi_ret));
-        }
-        // RSSI值会在ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT事件中打印
-    }
-
     // 读取电池电压并计算电量
     uint32_t battery_voltage_mv = read_battery_voltage();
     int battery_capacity = battery_calculate_capacity(battery_voltage_mv);
 
     if(g_sys_params.show_mac || g_sys_params.heartbeat_enable) {
-    // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
-    struct timeval tv_now;
-    gettimeofday(&tv_now, NULL);
-    uint32_t uptime_seconds = (uint32_t)tv_now.tv_sec;
+        if( g_sys_params.heartbeat_enable == 2)  g_sys_params.heartbeat_enable = 0;
+        // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
+        struct timeval tv_now;
+        gettimeofday(&tv_now, NULL);
+        uint32_t uptime_seconds = (uint32_t)tv_now.tv_sec;
         char nus_data[64] = "";  // 增加缓冲区大小以包含电池信息
-            snprintf((char*)nus_data, sizeof(nus_data), "%02X%02X%02X%02X%02X%02X %d%% %lu",
+            snprintf((char*)nus_data, sizeof(nus_data), "%02X%02X%02X%02X%02X%02X %lu",
                     macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
-                    battery_capacity,uptime_seconds);
+                    uptime_seconds);
         if(g_sys_params.show_mac) {
             lv_label_set_text_fmt(top_label, nus_data);
             lv_obj_clear_flag(top_label, LV_OBJ_FLAG_HIDDEN);
@@ -2244,9 +2485,9 @@ vTaskDelay(pdMS_TO_TICKS(100));
         }
         // 根据heartbeat参数决定是否发送心跳包
         if (g_sys_params.heartbeat_enable) {
-            snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu %lu %d%% %f",
+            snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu %lu %d%% %dC",
                 macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
-                uptime_seconds, battery_voltage_mv, battery_capacity, tsens_out);
+                uptime_seconds, battery_voltage_mv, battery_capacity, (int)tsens_out);
             send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
         }
     }
@@ -2282,6 +2523,85 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
 
+void writecard_task( void *pvParameters )
+{
+    (void)pvParameters;
+    int status = 5;
+    unsigned char carduid[10];
+    unsigned char cardpid[16];
+
+    ESP_LOGI(MMC_TAG, "Write card task, powering on devices...");
+
+    // 上电并等待模块稳定
+    NPD_EN(1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    // 初始化SI523
+    SI523_Init(i2c0_bus_hdl);
+    vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms让SI523初始化完成
+
+    for(int i = 0; i < status; i++) {
+        if(SI523_CheckVer() != 0){
+        PCD_SI523_TypeA_Init();
+        //PCD_SI523_TypeA();
+        if(PCD_SI523_TypeA_GetUID(carduid)==0){
+
+            if(SI523_write_YURIDATA() == MI_OK){
+              ESP_LOGI(MMC_TAG, "YURIDATA write successful");
+            }
+
+            // 使用全局变量 g_write_card_data 中的16字节数据，分4次写入，每次4字节
+            memcpy(cardpid, &g_write_card_data[0], 4);
+            if(SI523_write_NTAG(12, cardpid) == MI_OK){
+              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 0-3)");
+            }
+
+            memcpy(cardpid, &g_write_card_data[4], 4);
+            if(SI523_write_NTAG(12, cardpid) == MI_OK){
+              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 4-7)");
+            }
+
+            memcpy(cardpid, &g_write_card_data[8], 4);
+            if(SI523_write_NTAG(12, cardpid) == MI_OK){
+              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 8-11)");
+            }
+
+            memcpy(cardpid, &g_write_card_data[12], 4);
+            if(SI523_write_NTAG(12, cardpid) == MI_OK){
+              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 12-15)");
+            }
+
+            if(SI523_read_NTAG(12, cardpid) == MI_OK){
+            ESP_LOGI(MMC_TAG, "NTAG0: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
+            ESP_LOGI(MMC_TAG, "NTAG4: %02X %02X %02X %02X", cardpid[4], cardpid[5], cardpid[6], cardpid[7]);
+            ESP_LOGI(MMC_TAG, "NTAG8: %02X %02X %02X %02X", cardpid[8], cardpid[9], cardpid[10], cardpid[11]);
+            ESP_LOGI(MMC_TAG, "NTAGC: %02X %02X %02X %02X", cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
+
+            // 返回读取到的数据到上位机
+            char response[64];
+            snprintf(response, sizeof(response), "Read: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                     cardpid[0], cardpid[1], cardpid[2], cardpid[3],
+                     cardpid[4], cardpid[5], cardpid[6], cardpid[7],
+                     cardpid[8], cardpid[9], cardpid[10], cardpid[11],
+                     cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
+            send_upload_response(APP_ID_WRITE_CARD, (uint8_t*)response, strlen(response));
+            ESP_LOGI(MMC_TAG, "Card data sent to host");
+            break;
+            }
+        }}
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    // 测量完成，下电节省电量
+    ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
+    // 释放SI523设备资源
+    SI523_Deinit();
+    vTaskDelay(pdMS_TO_TICKS(10));
+    NPD_EN(0);
+
+    // 清除任务运行标志，允许创建新任务
+    g_task_running = 0;
+
+    vTaskDelete( NULL );
+}
 
 void i2c0_mmc56x3_task( void *pvParameters ) {
     // initialize i2c device configuration
@@ -2327,70 +2647,76 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
     mmc56x3_delete( dev_hdl );
     ESP_LOGI(MMC_TAG, "Task i2c0_mmc56x3_task completed");
 
+    // 检查是否有待发送的指南针响应
+    if(g_compending_response) {
+        g_compending_response = false;  // 清除标记位
+        char response[64];
+        snprintf(response, sizeof(response), "Comp=%d\nTrue_Head=%d", Compass_Heading, True_Heading);
+        send_upload_response(APP_ID_SYS_PARAM, (uint8_t*)response, strlen(response));
+        ESP_LOGI(MMC_TAG, "Compass response sent: %s", response);
+    }
 
+    g_task_running=3;
     vTaskDelete( NULL );
 }
 
 void key_task( void *pvParameters )
 {
     (void)pvParameters;
-int status = 5;
+    int status = 5;
     unsigned char carduid[10];
     unsigned char cardpid[16];
 
-    // 按键触发，开始上电初始化
-    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
+    // 按键触发，开始测量指南针
+    g_task_running=100;//超时
     xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
-
-
-
-
-
-    // 上电并等待模块稳定
-    NPD_EN(1);
+    while(g_task_running>10){
+        vTaskDelay(pdMS_TO_TICKS(100));
+        g_task_running--;
+    }
+    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
+    NPD_EN(1);// 上电并等待模块稳定
     vTaskDelay(pdMS_TO_TICKS(100));
-    // 初始化SI523
-    SI523_Init(i2c0_bus_hdl);
+    SI523_Init(i2c0_bus_hdl);// 初始化SI523
     vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms让SI523初始化完成
-
     for(int i = 0; i < status; i++) {    
         if(SI523_CheckVer() != 0){
         PCD_SI523_TypeA_Init();
         //PCD_SI523_TypeA();
-        if(PCD_SI523_TypeA_GetUID()==0){
+        if(PCD_SI523_TypeA_GetUID(carduid)==0){
             if(SI523_read_NTAG(12, cardpid) == MI_OK){
-            ESP_LOGI(MMC_TAG, "NTAG: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
+            ESP_LOGI(MMC_TAG, "NTAG0: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
+            ESP_LOGI(MMC_TAG, "NTAG4: %02X %02X %02X %02X", cardpid[4], cardpid[5], cardpid[6], cardpid[7]);
+            ESP_LOGI(MMC_TAG, "NTAG8: %02X %02X %02X %02X", cardpid[8], cardpid[9], cardpid[10], cardpid[11]);
+            ESP_LOGI(MMC_TAG, "NTAGC: %02X %02X %02X %02X", cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
             break;
-            }
-            // if(SI523_write_YURIDATA() == MI_OK){
-            //   ESP_LOGI(MMC_TAG, "YURIDATA write successful");
-            // }
-            // memccpy(cardpid, "9876", 4, 4);
-            // if(SI523_write_NTAG(12, cardpid) == MI_OK){
-            //   ESP_LOGI(MMC_TAG, "NTAG write successful");
-            // }
-            
-            if(g_sys_params.pos_label_enable) lv_label_set_text(pos_label, (const char*)cardpid);
+            }            
         }}
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    
-
-
-
-    //Compass_Heading True_Heading
-
-
     // 测量完成，下电节省电量
     ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
-
     // 释放SI523设备资源
     SI523_Deinit();
     vTaskDelay(pdMS_TO_TICKS(10));
     NPD_EN(0);
     
+    // Compass_Heading True_Heading cardpid[16]
+    // 处理NFC卡片数据
+    process_nfc_data(carduid, cardpid);
+
+
+
+
+
+
     // 清除任务运行标志，允许创建新任务
-    g_task_running = false;
+    g_task_running = 0;
 
     vTaskDelete( NULL );
 }
+
+
+
+
+

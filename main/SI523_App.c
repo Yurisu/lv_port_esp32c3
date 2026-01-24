@@ -827,7 +827,7 @@ void PCD_SI523_TypeA_Init(void)
  函数功能：读A卡
 
  ================================*/
-char PCD_SI523_TypeA_GetUID(void)
+char PCD_SI523_TypeA_GetUID(unsigned char *carduid)
 {
 	unsigned char ATQA[2];
 	unsigned char UID[12];
@@ -986,7 +986,7 @@ char PCD_SI523_TypeA_rw_block(void)
 	unsigned char UID[12];
 	unsigned char SAK = 0;
 	unsigned char CardReadBuf[16] = {0};
-	unsigned char CardWriteBuf[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+	//unsigned char CardWriteBuf[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
 	unsigned char DefaultKeyABuf[10] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 	// printf("\r\n\r\nTest_Si522_GetCard");
@@ -1033,7 +1033,7 @@ char PCD_SI523_TypeA_rw_block(void)
 	}
 
 	//Authenticate 验证密码
-	unsigned char ackbuf[2] = {0};
+	//unsigned char ackbuf[2] = {0};
 	if(PcdAuthState( PICC_AUTHENT1B, 4, DefaultKeyABuf, UID ) != MI_OK )
 	//if(PcdNTAG216_Auth(DefaultKeyABuf,ackbuf  ) != MI_OK )
 	{
@@ -1161,12 +1161,13 @@ void PCD_SI523_TypeB_Init(void)
 =================================*/
 void PCD_SI523_TypeA(void)
 {
+	unsigned char carduid[10];
 	ESP_LOGI(TAG, "Starting TypeA card reading loop");
 	while(1)
 	{
 	    unsigned char version = I_SI523_IO_Read(VersionReg);
 	    ESP_LOGI(TAG, "IC Version: 0x%02X", version);
-		PCD_SI523_TypeA_GetUID();//读取UID
+		PCD_SI523_TypeA_GetUID(carduid);//读取UID
 
 	//产生随机数
 	// for(unsigned char i=0;i<16;i++){
@@ -1204,7 +1205,7 @@ char SI523_write_YURIDATA(void)
 		0x6d,0xfe,0x00,0x00\
 	};
 	for(unsigned char i=0;i<8;i++){
-		//写BLOCK 写入新的数据,每次4个字节
+		//写04 BLOCK 写入新的数据,每次4个字节
 		if( PcdWrite( i+4, CardWriteBuf1+(i*4) ) != MI_OK )
 		{
 			ESP_LOGI(TAG, "PcdWrite:fail");
@@ -1810,7 +1811,7 @@ void GetLastCardID( unsigned char *id )
 void PICC_DumpMifareUltralightToLog(void)
 {
     char status;
-    unsigned char byteCount;
+    //unsigned char byteCount;
     unsigned char buffer[18];
     char log_line[128];
     unsigned char i;
@@ -1819,7 +1820,7 @@ void PICC_DumpMifareUltralightToLog(void)
     // Try the pages of the original Ultralight. Ultralight C has more pages.
     for(unsigned char page = 0; page < 16; page += 4) { // Read returns data for 4 pages at a time.
         // Read pages
-        byteCount = sizeof(buffer);
+        //byteCount = sizeof(buffer);
         status = PcdRead(page, buffer);
         if(status != MI_OK) {
             ESP_LOGE(TAG, "PcdRead() failed: status=%d", status);

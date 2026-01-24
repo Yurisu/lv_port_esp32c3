@@ -225,7 +225,7 @@ char PcdRead (unsigned char ucAddr, unsigned char * pData );
 //***********************************//修改新增内容
 
 void PCD_SI523_TypeA_Init(void);		//读A卡初始化
-char PCD_SI523_TypeA_GetUID(void);		//读A卡
+char PCD_SI523_TypeA_GetUID(unsigned char *carduid);		//读A卡
 char PCD_SI523_TypeA_rw_block(void);		//读A卡扇区
 void PCD_SI523_TypeB_Init(void);		//读B卡初始化
 char PCD_SI523_TypeB_GetUID(void);		//读B卡
