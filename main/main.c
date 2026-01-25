@@ -234,7 +234,6 @@ static esp_bd_addr_t remote_bda = {0};  // 存储远端设备地址
 
 static uint16_t hid_conn_id = 0;
 static bool sec_conn = false;
-static bool send_volum_up = false;
 #define CHAR_DECLARATION_SIZE (sizeof(uint8_t))
 
 static esp_ble_adv_data_t hidd_adv_data = {
@@ -1469,39 +1468,9 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
 // g_sys_params.role_action
 
 
-    // 检查图片1文件名是否变化
-    if (strcmp(last_role_type, g_sys_params.role_type) != 0) {
-        strncpy(last_role_type, g_sys_params.role_type, 19);
-        last_role_type[19] = '\0';
-        char bg_img_path[35];
-        snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
-        lv_img_set_src(bg_img, bg_img_path);
-        ESP_LOGI(NFC_DATA_TAG, "Background image updated: %s", bg_img_path);
-    }
 
-    // 检查图片2文件名是否变化
-    if (strcmp(last_role_action, g_sys_params.role_action) != 0) {
-        strncpy(last_role_action, g_sys_params.role_action, 19);
-        last_role_action[19] = '\0';
-        char bom_img_path[35];
-        snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.role_action);
-        lv_img_set_src(bom_img, bom_img_path);
-        ESP_LOGI(NFC_DATA_TAG, "Foreground image updated: %s", bom_img_path);
-    }
 
-    // 检查图片模式是否变化
-    if (last_bg_image_mode != g_sys_params.bg_image_mode) {
-        last_bg_image_mode = g_sys_params.bg_image_mode;
-        if (g_sys_params.bg_image_mode == 0) {
-            // 显示图片2（上层图片）
-            lv_obj_clear_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
-            ESP_LOGI(NFC_DATA_TAG, "Foreground image shown (mode=0)");
-        } else {
-            // 隐藏图片2（上层图片）
-            lv_obj_add_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
-            ESP_LOGI(NFC_DATA_TAG, "Foreground image hidden (mode=1)");
-        }
-    }
+
 
     // 更新位置标签显示
     lv_label_set_text(pos_label, role_pos);
@@ -1517,7 +1486,7 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
 
 
 
-
+ 
 
 
 
@@ -1539,6 +1508,9 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
             // 将角色类型写入card_data
             strncpy(g_sys_params.role_type, (char*)&card_data[1], 15);
             save_system_params_to_nvs();
+            char bg_img_path[35];
+            snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
+            lv_img_set_src(bg_img, bg_img_path);
             ESP_LOGI(NFC_DATA_TAG, "Role type set to: %s", g_sys_params.role_type);
             break;
         }
@@ -1548,7 +1520,9 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
             // 将角色行动写入card_data
             strncpy(g_sys_params.role_action, (char*)&card_data[1], 15);
             save_system_params_to_nvs();
-
+            char bom_img_path[35];
+            snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.role_action);
+            lv_img_set_src(bom_img, bom_img_path);
             ESP_LOGI(NFC_DATA_TAG, "Role action set to: %s", g_sys_params.role_action);
             break;
         }
@@ -2422,18 +2396,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
   while (1) {
-    ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
-
-    // 背光控制
-    BG_EN(g_sys_params.backlight_enable);
-
-    if(g_sys_params.pos_label_enable) {
-        lv_obj_clear_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    
+    ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());    
     // 启用温度传感器
     ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
     float tsens_out;
@@ -2447,17 +2410,29 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
     // 低电量检测和图片显示（电量<=20%时显示）
     if (battery_capacity <= 20) {
-
         // 图片已存在，确保显示
         lv_obj_clear_flag(lowpw_img, LV_OBJ_FLAG_HIDDEN);
     } else {
         // 电量恢复，隐藏低电量图片
-        if (lowpw_img != NULL) {
-            lv_obj_add_flag(lowpw_img, LV_OBJ_FLAG_HIDDEN);
-            ESP_LOGI("BATTERY", "Low power warning hidden, capacity=%d%%", battery_capacity);
-        }
+        lv_obj_add_flag(lowpw_img, LV_OBJ_FLAG_HIDDEN);
     }
 
+    // 背光控制
+    BG_EN(g_sys_params.backlight_enable);
+
+    if(g_sys_params.pos_label_enable) {
+        lv_obj_clear_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (g_sys_params.bg_image_mode == 0) {
+        // 显示图片2（上层图片）
+        lv_obj_clear_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        // 隐藏图片2（上层图片）
+        lv_obj_add_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
     struct timeval tv_now;
@@ -2480,16 +2455,12 @@ vTaskDelay(pdMS_TO_TICKS(100));
                 uptime_seconds);
         lv_label_set_text_fmt(top_label, nus_data);
         lv_obj_clear_flag(top_label, LV_OBJ_FLAG_HIDDEN);
-        //显示电池电量
-
-
     } else {
         lv_obj_add_flag(top_label, LV_OBJ_FLAG_HIDDEN);
     }
     lv_tick_inc(100);
     lv_task_handler();
     vTaskDelay(pdMS_TO_TICKS(g_sys_params.run_interval));
-
 
   }
 
