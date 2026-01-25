@@ -761,7 +761,7 @@ char PcdWrite(unsigned char addr,unsigned char *pData)
     unsigned int unLen;
     unsigned char ucComMF522Buf[MAXRLEN]; 
     
-    ESP_LOGD(TAG, "Write block %02X: %02X%02X%02X%02X...", 
+    ESP_LOGI(TAG, "Write block %02X: %02X%02X%02X%02X...", 
              addr, pData[0], pData[1], pData[2], pData[3]);
     
     ucComMF522Buf[0] = PICC_WRITE;
@@ -1187,7 +1187,18 @@ char SI523_read_NTAG(unsigned char page, unsigned char *buffer)
 //每次写入一页,4字节,Yuri数据存12页
 char SI523_write_NTAG(unsigned char page, unsigned char *buffer)
 {
-	return PcdWrite(page, buffer);
+	uint8_t ret = MI_OK;
+	ESP_LOGI("SI523_write_NTAG", "Writing 4 pages (16 bytes) from page %d", page);
+	// 固定写入4页（16字节），不使用strlen计算长度
+	for(unsigned char i=0;i<4;i++){
+		//写04 BLOCK 写入新的数据,每次4个字节
+		if( PcdWrite( i+page, buffer+(i*4) ) != MI_OK )
+		{
+			ESP_LOGI("SI523_write_NTAG", "PcdWrite:fail");
+			return MI_ERR;
+		}
+	}
+	return MI_OK;
 }
 char SI523_write_YURIDATA(void)
 {

@@ -265,6 +265,30 @@ class BLEConnectionManager:
             traceback.print_exc()
             return False
 
+    async def send_nfc_read_command(self):
+        """发送NFC读取命令（0xEE 0x4E 0x46 0x43）"""
+        self.log(f"\n{'='*60}")
+        self.log("发送NFC读取命令 (0xEE 0x4E 0x46 0x43)")
+        self.log(f"{'='*60}")
+
+        try:
+            # 组装帧：0xEE 0x4E 0x46 0x43 (ASCII: "NFC")
+            frame = bytes([0xEE, 0x4E, 0x46, 0x43])
+
+            self.log(f"帧(hex): {frame.hex()}")
+            self.log(f"帧(ASCII): {frame.decode('ascii', errors='replace')}")
+
+            success = await self.send_data(frame)
+            if success:
+                self.log("✓ NFC读取命令发送成功!")
+            return success
+
+        except Exception as e:
+            self.log(f"✗ 发送NFC读取命令失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     async def _monitor_connection(self):
         """监控连接状态"""
         try:
@@ -405,7 +429,7 @@ class WriteCardGUI:
         # 写卡按钮
         write_btn_frame = ttk.Frame(data_frame)
         write_btn_frame.pack(fill=tk.X, pady=10)
-        ttk.Button(write_btn_frame, text="验证数据", command=self.validate_data).pack(side=tk.LEFT, padx=5)
+        ttk.Button(write_btn_frame, text="读取NFC卡", command=self.read_nfc_card).pack(side=tk.LEFT, padx=5)
         ttk.Button(write_btn_frame, text="写入NFC卡", command=self.write_card).pack(side=tk.LEFT, padx=5)
 
         # Read数据显示区域
@@ -652,6 +676,7 @@ class WriteCardGUI:
         try:
             data = self.parse_data_input()
         except ValueError as e:
+            messagebox.showerror("数据验证失败", f"数据格式错误: {e}")
             self.log(f"✗ 错误: 数据格式错误 - {e}")
             return
 
@@ -664,6 +689,22 @@ class WriteCardGUI:
             async def do_write():
                 await self.manager.send_write_card_command(data)
             self.run_async(do_write())
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def read_nfc_card(self):
+        """读取NFC卡"""
+        if not self.check_connected():
+            return
+
+        self.log(f"\n{'='*60}")
+        self.log("准备读取NFC卡...")
+        self.log(f"{'='*60}")
+
+        def task():
+            async def do_read():
+                await self.manager.send_nfc_read_command()
+            self.run_async(do_read())
 
         threading.Thread(target=task, daemon=True).start()
 

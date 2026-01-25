@@ -85,11 +85,9 @@
 #define NVS_KEY_POS_LABEL_X    "pos_label_x"       // 位置标签x
 #define NVS_KEY_POS_LABEL_Y    "pos_label_y"       // 位置标签y
 #define NVS_KEY_HEARTBEAT      "heartbeat"         // 心跳包开关
-#define NVS_KEY_IMG1_FILE      "img1_file"        // 图1文件名
-#define NVS_KEY_IMG2_FILE      "img2_file"        // 图2文件名
+#define NVS_KEY_role_type      "role_type"        // 图1文件名,角色类型
+#define NVS_KEY_role_action      "role_action"        // 图2文件名,角色行动
 #define NVS_KEY_ROLE_NAME      "role_name"         // 角色名称
-#define NVS_KEY_ROLE_TYPE      "role_type"         // 角色类型
-#define NVS_KEY_ROLE_ACTION    "role_action"       // 行动类型
 
 #define BATTERY_REPORT_ID 0x02
 #define BATTERY_REPORT_SIZE 1
@@ -104,6 +102,8 @@
 #define BATTERY_ADC                    GPIO_NUM_3
 
 #define GPIO_INTERRUPT_PIN             GPIO_NUM_21
+
+extern const lv_img_dsc_t lowpw;
 
 // 协议状态枚举
 typedef enum {
@@ -140,6 +140,9 @@ static uint8_t g_write_card_data[16] = {0};
 // 指南针响应标记位（非阻塞模式）
 static bool g_compending_response = false;  // 是否有待发送的指南针响应
 
+// NFC响应标记位（非阻塞模式）
+static bool g_nfc_pending_response = false;  // 是否有待发送的NFC响应
+
 // 系统参数结构
 typedef struct {
     uint16_t comp_offset;          // 指南针偏移：0~360
@@ -151,13 +154,10 @@ typedef struct {
     uint8_t pos_label_x;         // 位置标签x：0~128
     uint8_t pos_label_y;         // 位置标签y：0~128
     uint8_t heartbeat_enable;      // 心跳包：0=关闭, 1=开启
-    char img1_file[20];         // 图1显示图片文件名（长度<20
-    char img2_file[20];         // 图2显示图片文件名（长度<20）
+    char role_type[20];         // 图1显示图片文件名（长度<20
+    char role_action[20];         // 图2显示图片文件名（长度<20）
     char role_name[20];         // 角色名称（长度<20）
-    uint8_t role_type;          // 角色类型：0~255
-    uint8_t role_action;        // 行动类型：0~255
 } system_params_t;
-
 // 系统参数全局变量（默认值）
 static system_params_t g_sys_params = {
     .comp_offset = 0,              // 默认0度偏移
@@ -169,11 +169,9 @@ static system_params_t g_sys_params = {
     .pos_label_x = 36,            // 默认
     .pos_label_y = 100,           // 默认
     .heartbeat_enable = 1,          // 默认开启心跳包
-    .img1_file = "t-3.jpg",      // 默认图1文件名
-    .img2_file = "b-3.jpg",       // 默认图2文件名
+    .role_type = "t-3.jpg",      // 默认图1文件名,默认角色类型
+    .role_action = "b-3.jpg",       // 默认图2文件名,默认角色行动
     .role_name = "default",        // 默认角色名称
-    .role_type = 0,              // 默认角色类型
-    .role_action = 0             // 默认行动类型
 };
 
 
@@ -214,7 +212,7 @@ static void load_system_params_from_nvs(void);
 static void save_system_params_to_nvs(void);
 
 // 触发测量任务函数
-static esp_err_t start_measure_task(void);
+static esp_err_t start_measure_task(bool send_nfc_response);
 static esp_err_t start_write_card_task(void);
 
 // 回传协议函数
@@ -441,6 +439,7 @@ static lv_obj_t *pos_label;
 static lv_obj_t *bg_img;
 static lv_obj_t *bom_img;
 static lv_obj_t *gif_obj;
+static lv_obj_t *lowpw_img = NULL;  // 低电量图片对象
 
 // void lv_tick_task(void *arg) {
 //   (void) arg;
@@ -655,23 +654,23 @@ static void load_system_params_from_nvs(void) {
 
         // 图1文件名
         size_t required_size = 20;
-        if (nvs_get_str(nvs_handle, NVS_KEY_IMG1_FILE, g_sys_params.img1_file, &required_size) != ESP_OK) {
-            ESP_LOGW("SYS", "No img1_file in NVS, using default");
+        if (nvs_get_str(nvs_handle, NVS_KEY_role_type, g_sys_params.role_type, &required_size) != ESP_OK) {
+            ESP_LOGW("SYS", "No role_type in NVS, using default");
         } else {
             if (required_size >= 20) {
-                ESP_LOGW("SYS", "img1_file too long, truncating");
-                g_sys_params.img1_file[19] = '\0';
+                ESP_LOGW("SYS", "role_type too long, truncating");
+                g_sys_params.role_type[19] = '\0';
             }
         }
 
         // 图2文件名
         required_size = 20;
-        if (nvs_get_str(nvs_handle, NVS_KEY_IMG2_FILE, g_sys_params.img2_file, &required_size) != ESP_OK) {
-            ESP_LOGW("SYS", "No img2_file in NVS, using default");
+        if (nvs_get_str(nvs_handle, NVS_KEY_role_action, g_sys_params.role_action, &required_size) != ESP_OK) {
+            ESP_LOGW("SYS", "No role_action in NVS, using default");
         } else {
             if (required_size >= 20) {
-                ESP_LOGW("SYS", "img2_file too long, truncating");
-                g_sys_params.img2_file[19] = '\0';
+                ESP_LOGW("SYS", "role_action too long, truncating");
+                g_sys_params.role_action[19] = '\0';
             }
         }
 
@@ -686,23 +685,7 @@ static void load_system_params_from_nvs(void) {
             }
         }
 
-        // 角色类型
-        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLE_TYPE, &val) == ESP_OK) {
-            if (val >= 0 && val <= 255) {
-                g_sys_params.role_type = (uint8_t)val;
-            } else {
-                ESP_LOGW("SYS", "Invalid role_type from NVS: %d, using default", val);
-            }
-        }
 
-        // 行动类型
-        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLE_ACTION, &val) == ESP_OK) {
-            if (val >= 0 && val <= 255) {
-                g_sys_params.role_action = (uint8_t)val;
-            } else {
-                ESP_LOGW("SYS", "Invalid role_action from NVS: %d, using default", val);
-            }
-        }
 
         nvs_close(nvs_handle);
         ESP_LOGI("SYS", "System parameters loaded from NVS");
@@ -726,11 +709,9 @@ static void save_system_params_to_nvs(void) {
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_X, g_sys_params.pos_label_x);
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_Y, g_sys_params.pos_label_y);
         nvs_set_i32(nvs_handle, NVS_KEY_HEARTBEAT, g_sys_params.heartbeat_enable);
-        nvs_set_str(nvs_handle, NVS_KEY_IMG1_FILE, g_sys_params.img1_file);
-        nvs_set_str(nvs_handle, NVS_KEY_IMG2_FILE, g_sys_params.img2_file);
+        nvs_set_str(nvs_handle, NVS_KEY_role_type, g_sys_params.role_type);
+        nvs_set_str(nvs_handle, NVS_KEY_role_action, g_sys_params.role_action);
         nvs_set_str(nvs_handle, NVS_KEY_ROLE_NAME, g_sys_params.role_name);
-        nvs_set_i32(nvs_handle, NVS_KEY_ROLE_TYPE, g_sys_params.role_type);
-        nvs_set_i32(nvs_handle, NVS_KEY_ROLE_ACTION, g_sys_params.role_action);
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
         ESP_LOGI("SYS", "System parameters saved to NVS");
@@ -740,7 +721,7 @@ static void save_system_params_to_nvs(void) {
 }
 
 // 触发测量任务（等同于按键中断中的任务）
-static esp_err_t start_measure_task(void)
+static esp_err_t start_measure_task(bool send_nfc_response)
 {
     // 检查任务是否正在运行，防止重复创建
     if (g_task_running) {
@@ -748,6 +729,12 @@ static esp_err_t start_measure_task(void)
         const char *warning_msg = "Error: Task already running";
         send_upload_response(APP_ID_SYSTEM, (uint8_t*)warning_msg, strlen(warning_msg));
         return ESP_ERR_INVALID_STATE;
+    }
+
+    // 设置NFC响应标志（如果需要）
+    if (send_nfc_response) {
+        g_nfc_pending_response = true;
+        ESP_LOGI("CMDp", "NFC response flag set, will send data after key_task completes");
     }
 
     // 创建一次性任务来处理按键事件（等同于按键中断）
@@ -761,6 +748,7 @@ static esp_err_t start_measure_task(void)
         return ESP_OK;
     } else {
         g_task_running = 0;  // 创建失败，重置标志
+        g_nfc_pending_response = false;  // 清除NFC响应标志
         const char *error_msg = "Error: Failed to create task";
         send_upload_response(APP_ID_SYSTEM, (uint8_t*)error_msg, strlen(error_msg));
         ESP_LOGE("CMDp", "Failed to create key task");
@@ -1195,23 +1183,23 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             return ESP_ERR_INVALID_ARG;
         }
     }
-    else if (strcmp(key, "img1_file") == 0) {
+    else if (strcmp(key, "role_type") == 0) {
         if (strlen(value) > 0 && strlen(value) < 20) {
-            strncpy(g_sys_params.img1_file, value, 19);
-            g_sys_params.img1_file[19] = '\0';
+            strncpy(g_sys_params.role_type, value, 19);
+            g_sys_params.role_type[19] = '\0';
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid img1_file value: %s (length=%d)", value, (int)strlen(value));
+            ESP_LOGE("CMDp", "Invalid role_type value: %s (length=%d)", value, (int)strlen(value));
             return ESP_ERR_INVALID_ARG;
         }
     }
-    else if (strcmp(key, "img2_file") == 0) {
+    else if (strcmp(key, "role_action") == 0) {
         if (strlen(value) > 0 && strlen(value) < 20) {
-            strncpy(g_sys_params.img2_file, value, 19);
-            g_sys_params.img2_file[19] = '\0';
+            strncpy(g_sys_params.role_action, value, 19);
+            g_sys_params.role_action[19] = '\0';
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid img2_file value: %s (length=%d)", value, (int)strlen(value));
+            ESP_LOGE("CMDp", "Invalid role_action value: %s (length=%d)", value, (int)strlen(value));
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1222,26 +1210,6 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             param_changed = true;
         } else {
             ESP_LOGE("CMDp", "Invalid role_name value: %s (length=%d)", value, (int)strlen(value));
-            return ESP_ERR_INVALID_ARG;
-        }
-    }
-    else if (strcmp(key, "role_type") == 0) {
-        int val = atoi(value);
-        if (val >= 0 && val <= 255) {
-            g_sys_params.role_type = (uint8_t)val;
-            param_changed = true;
-        } else {
-            ESP_LOGE("CMDp", "Invalid role_type value: %d", val);
-            return ESP_ERR_INVALID_ARG;
-        }
-    }
-    else if (strcmp(key, "role_action") == 0) {
-        int val = atoi(value);
-        if (val >= 0 && val <= 255) {
-            g_sys_params.role_action = (uint8_t)val;
-            param_changed = true;
-        } else {
-            ESP_LOGE("CMDp", "Invalid role_action value: %d", val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1344,20 +1312,14 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     else if (strcmp(key_str, "heartbeat") == 0) {
         snprintf(response, sizeof(response), "heartbeat=%d", g_sys_params.heartbeat_enable);
     }
-    else if (strcmp(key_str, "img1_file") == 0) {
-        snprintf(response, sizeof(response), "img1_file=%s", g_sys_params.img1_file);
+    else if (strcmp(key_str, "role_type") == 0) {
+        snprintf(response, sizeof(response), "role_type=%s", g_sys_params.role_type);
     }
-    else if (strcmp(key_str, "img2_file") == 0) {
-        snprintf(response, sizeof(response), "img2_file=%s", g_sys_params.img2_file);
+    else if (strcmp(key_str, "role_action") == 0) {
+        snprintf(response, sizeof(response), "role_action=%s", g_sys_params.role_action);
     }
     else if (strcmp(key_str, "role_name") == 0) {
         snprintf(response, sizeof(response), "role_name=%s", g_sys_params.role_name);
-    }
-    else if (strcmp(key_str, "role_type") == 0) {
-        snprintf(response, sizeof(response), "role_type=%d", g_sys_params.role_type);
-    }
-    else if (strcmp(key_str, "role_action") == 0) {
-        snprintf(response, sizeof(response), "role_action=%d", g_sys_params.role_action);
     }
     else if (strcmp(key_str, "Comp") == 0) {
         // Comp 是只读参数，返回当前指南针方向
@@ -1438,7 +1400,7 @@ static esp_err_t handle_write_card_frame(const uint8_t *data, uint16_t length) {
     if (ret == ESP_OK) {
         const char *success_msg = "Write card task started";
         send_upload_response(APP_ID_SYSTEM, (uint8_t*)success_msg, strlen(success_msg));
-        ESP_LOGI("CMDp", "Write card task created successfully");
+        ESP_LOGI("CMDp", "Write card task created.");
     } else {
         const char *error_msg = "Error: Failed to create write card task";
         send_upload_response(APP_ID_SYSTEM, (uint8_t*)error_msg, strlen(error_msg));
@@ -1477,31 +1439,88 @@ static esp_err_t start_write_card_task(void)
 // 参数：
 //       card_uid - 卡片UID（7字节）
 //       card_data - NFC卡片数据（16字节）
+#define NFC_DATA_TAG "NFCD"
 static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data)
 {
+    char role_pos[20] = {0};         // 角色位置(只读)（长度<20）
+
     if (card_data == NULL) {
-        ESP_LOGW("NFC", "Card data is NULL");
+        ESP_LOGW(NFC_DATA_TAG, "Card data is NULL");
         return;
     }
 
     uint8_t index = card_data[0];
 
-    ESP_LOGI("NFC", "Processing NFC data, index=0x%02X", index);
+    ESP_LOGI(NFC_DATA_TAG, "Processing NFC data, index=0x%02X", index);
 
     switch (index) 
     {
-        case 0x31:  // 六边形坐标
+        case 0x31:  // 六边形坐标,发送:角色名称,角色类型,角色行动,位置标签,指南针真值.
         {
-            if (True_Heading >= 0 && True_Heading <= 360) {
-                // 将指南针方向转换为六边形坐标格式
-                int hex_coord = (True_Heading * 6) / 360;
-                card_data[3] = (hex_coord >> 8) & 0xFF;  // x-high
-                card_data[4] = hex_coord & 0xFF;           // x-low
-                card_data[5] = (hex_coord >> 8) & 0xFF;  // y-high
-                card_data[6] = hex_coord & 0xFF;           // y-low
-                card_data[7] = (hex_coord >> 8) & 0xFF;  // z-high
-                card_data[8] = hex_coord & 0xFF;           // z-low
-                ESP_LOGI("NFC", "Hex coord set: %d, compass: %d", hex_coord, True_Heading);
+            if(card_data[1] != 0x00)
+            {
+                strncpy(role_pos, (char*)&card_data[1], 15);
+                // tudo,位置信息需要显示在屏幕上,没有位置时屏幕标签清除
+                ESP_LOGI(NFC_DATA_TAG, "Hexagon position: %s", role_pos);
+                //(APP_ID=0xCC): 角色名称(15字节) + ',' + 角色类型(文件名15字节) + ',' + 角色行动(文件名15字节) + 
+                //',' + 六边形坐标xyz(15字节 无效时传-) + ',' + 指南针真北(4字节 无效时传-1)
+// g_sys_params.role_name
+// g_sys_params.role_type
+// g_sys_params.role_action
+
+
+    // 检查图片1文件名是否变化
+    if (strcmp(last_role_type, g_sys_params.role_type) != 0) {
+        strncpy(last_role_type, g_sys_params.role_type, 19);
+        last_role_type[19] = '\0';
+        char bg_img_path[35];
+        snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
+        lv_img_set_src(bg_img, bg_img_path);
+        ESP_LOGI(NFC_DATA_TAG, "Background image updated: %s", bg_img_path);
+    }
+
+    // 检查图片2文件名是否变化
+    if (strcmp(last_role_action, g_sys_params.role_action) != 0) {
+        strncpy(last_role_action, g_sys_params.role_action, 19);
+        last_role_action[19] = '\0';
+        char bom_img_path[35];
+        snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.role_action);
+        lv_img_set_src(bom_img, bom_img_path);
+        ESP_LOGI(NFC_DATA_TAG, "Foreground image updated: %s", bom_img_path);
+    }
+
+    // 检查图片模式是否变化
+    if (last_bg_image_mode != g_sys_params.bg_image_mode) {
+        last_bg_image_mode = g_sys_params.bg_image_mode;
+        if (g_sys_params.bg_image_mode == 0) {
+            // 显示图片2（上层图片）
+            lv_obj_clear_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI(NFC_DATA_TAG, "Foreground image shown (mode=0)");
+        } else {
+            // 隐藏图片2（上层图片）
+            lv_obj_add_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI(NFC_DATA_TAG, "Foreground image hidden (mode=1)");
+        }
+    }
+
+    // 更新位置标签显示
+    lv_label_set_text(pos_label, role_pos);
+    lv_obj_set_style_text_color(pos_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
+
+
+
+
+
+
+
+
+
+
+
+
+
             }
             break;
         }
@@ -1509,30 +1528,28 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
         case 0x32:  // 角色名称
         {
             // 将角色名称写入card_data
-            // card_data[2]开始，最多14字节
-            memset(&card_data[2], 0, 14);
-            strncpy((char*)&card_data[2], g_sys_params.role_name, 14);
-            ESP_LOGI("NFC", "Role name written: %s", g_sys_params.role_name);
+            strncpy(g_sys_params.role_name, (char*)&card_data[1], 15);
+            save_system_params_to_nvs();
+            ESP_LOGI(NFC_DATA_TAG, "Role name set to: %s", g_sys_params.role_name);
             break;
         }
 
         case 0x33:  // 角色类型
         {
             // 将角色类型写入card_data
-            // card_data[2]开始，最多14字节
-            memset(&card_data[2], 0, 14);
-            snprintf((char*)&card_data[2], 14, "%d", g_sys_params.role_type);
-            ESP_LOGI("NFC", "Role type written: %d", g_sys_params.role_type);
+            strncpy(g_sys_params.role_type, (char*)&card_data[1], 15);
+            save_system_params_to_nvs();
+            ESP_LOGI(NFC_DATA_TAG, "Role type set to: %s", g_sys_params.role_type);
             break;
         }
 
-        case 0x34:  // 行动类型
+        case 0x34:  // 角色行动
         {
-            // 将行动类型写入card_data
-            // card_data[2]开始，最多14字节
-            memset(&card_data[2], 0, 14);
-            snprintf((char*)&card_data[2], 14, "%d", g_sys_params.role_action);
-            ESP_LOGI("NFC", "Role action written: %d", g_sys_params.role_action);
+            // 将角色行动写入card_data
+            strncpy(g_sys_params.role_action, (char*)&card_data[1], 15);
+            save_system_params_to_nvs();
+
+            ESP_LOGI(NFC_DATA_TAG, "Role action set to: %s", g_sys_params.role_action);
             break;
         }
 
@@ -1542,13 +1559,13 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
             if(card_data[1] != 0x21 || card_data[2] != 0x31) {
                 g_sys_params.comp_offset = Compass_Heading;
                 save_system_params_to_nvs();
-                ESP_LOGI("NFC", "Compass offset set to: %d degrees", g_sys_params.comp_offset);
+                ESP_LOGI(NFC_DATA_TAG, "Compass offset set to: %d degrees", g_sys_params.comp_offset);
             }
             break;
         }
 
         default:
-            ESP_LOGW("NFC", "Unknown index: 0x%02X", index);
+            ESP_LOGW(NFC_DATA_TAG, "Unknown index: 0x%02X", index);
             break;
     }
 }
@@ -2030,10 +2047,10 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                     esp_restart();
                 }
                 // NFC触发命令：0xEE 0x4E 0x46 0x43 ("NFC")
-                else if (length == CMD_NFC_LEN &&
-                         data[1] == 0x4E && data[2] == 0x46 && data[3] == 0x43) {
+                else                 if (length == CMD_NFC_LEN &&
+                    data[1] == 0x4E && data[2] == 0x46 && data[3] == 0x43) {
                     ESP_LOGI("CMDp", "NFC trigger command received");
-                    start_measure_task();
+                    start_measure_task(true);  // NFC触发命令需要发送NFC响应
                 }
                 else {
                     ESP_LOGW("CMDp", "Unknown system command, length=%d", length);
@@ -2347,7 +2364,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
     // 创建全屏背景图片 (128*128)
     bg_img = lv_img_create(lv_scr_act());
     char bg_img_path[35];
-    snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.img1_file);
+    snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
     lv_img_set_src(bg_img, bg_img_path);
     lv_obj_set_size(bg_img, LV_HOR_RES, LV_VER_RES);
     lv_obj_center(bg_img);
@@ -2355,7 +2372,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
         // 创建下层图片 (64*128) 显示
         bom_img = lv_img_create(lv_scr_act());
         char bom_img_path[35];
-        snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.img2_file);
+        snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.role_action);
         lv_img_set_src(bom_img, bom_img_path);
         lv_obj_set_size(bom_img, 128, 64);
         lv_obj_align(bom_img, LV_ALIGN_TOP_LEFT, 0, 64);
@@ -2365,7 +2382,13 @@ vTaskDelay(pdMS_TO_TICKS(100));
         // lv_gif_set_src(gif_obj, "A:/100w.gif");
         // //lv_obj_set_size(gif_obj, 80, 80);
         // lv_obj_align(gif_obj, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-    
+
+        // 首次检测到低电量，创建图片对象（只创建一次）
+        lowpw_img = lv_img_create(lv_scr_act());
+        lv_img_set_src(lowpw_img, &lowpw);
+        lv_obj_set_size(lowpw_img, 35, 35);
+        lv_obj_align(lowpw_img, LV_ALIGN_BOTTOM_RIGHT, -15, -15);
+        //lv_obj_hide(lowpw_img);
 
     // 创建top标签
     static lv_obj_t *top_label;
@@ -2397,10 +2420,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
 
-  // 记录上次使用的图片文件名，用于检测变化
-  static char last_img1_file[20] = "";
-  static char last_img2_file[20] = "";
-  static uint8_t last_bg_image_mode = 2;  // 记录上次的显示模式，初始值为2（无效值，确保首次检查）
 
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());
@@ -2408,58 +2427,17 @@ vTaskDelay(pdMS_TO_TICKS(100));
     // 背光控制
     BG_EN(g_sys_params.backlight_enable);
 
-    // 检查图片1文件名是否变化
-    if (strcmp(last_img1_file, g_sys_params.img1_file) != 0) {
-        strncpy(last_img1_file, g_sys_params.img1_file, 19);
-        last_img1_file[19] = '\0';
-        char bg_img_path[35];
-        snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.img1_file);
-        lv_img_set_src(bg_img, bg_img_path);
-        ESP_LOGI("app_main", "Background image updated: %s", bg_img_path);
-    }
-
-    // 检查图片2文件名是否变化
-    if (strcmp(last_img2_file, g_sys_params.img2_file) != 0) {
-        strncpy(last_img2_file, g_sys_params.img2_file, 19);
-        last_img2_file[19] = '\0';
-        char bom_img_path[35];
-        snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.img2_file);
-        lv_img_set_src(bom_img, bom_img_path);
-        ESP_LOGI("app_main", "Foreground image updated: %s", bom_img_path);
-    }
-
-    // 检查图片模式是否变化
-    if (last_bg_image_mode != g_sys_params.bg_image_mode) {
-        last_bg_image_mode = g_sys_params.bg_image_mode;
-        if (g_sys_params.bg_image_mode == 0) {
-            // 显示图片2（上层图片）
-            lv_obj_clear_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
-            ESP_LOGI("app_main", "Foreground image shown (mode=0)");
-        } else {
-            // 隐藏图片2（上层图片）
-            lv_obj_add_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
-            ESP_LOGI("app_main", "Foreground image hidden (mode=1)");
-        }
-    }
-
-    // 更新位置标签显示
-    lv_label_set_text(pos_label, g_sys_params.role_name);
-    lv_obj_set_style_text_color(pos_label, lv_color_black(), 0);
-    lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
     if(g_sys_params.pos_label_enable) {
-        lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
         lv_obj_clear_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
     }
-
 
     
     // 启用温度传感器
     ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
     float tsens_out;
     ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
-    //ESP_LOGI("app_main", "Free Heap Size: %f", tsens_out);
     // 温度传感器使用完毕后，禁用温度传感器，节约功耗
     ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
 
@@ -2467,31 +2445,47 @@ vTaskDelay(pdMS_TO_TICKS(100));
     uint32_t battery_voltage_mv = read_battery_voltage();
     int battery_capacity = battery_calculate_capacity(battery_voltage_mv);
 
-    if(g_sys_params.show_mac || g_sys_params.heartbeat_enable) {
-        if( g_sys_params.heartbeat_enable == 2)  g_sys_params.heartbeat_enable = 0;
-        // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
-        struct timeval tv_now;
-        gettimeofday(&tv_now, NULL);
-        uint32_t uptime_seconds = (uint32_t)tv_now.tv_sec;
-        char nus_data[64] = "";  // 增加缓冲区大小以包含电池信息
-            snprintf((char*)nus_data, sizeof(nus_data), "%02X%02X%02X%02X%02X%02X %lu",
-                    macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
-                    uptime_seconds);
-        if(g_sys_params.show_mac) {
-            lv_label_set_text_fmt(top_label, nus_data);
-            lv_obj_clear_flag(top_label, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(top_label, LV_OBJ_FLAG_HIDDEN);
-        }
-        // 根据heartbeat参数决定是否发送心跳包
-        if (g_sys_params.heartbeat_enable) {
-            snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu %lu %d%% %dC",
-                macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
-                uptime_seconds, battery_voltage_mv, battery_capacity, (int)tsens_out);
-            send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
+    // 低电量检测和图片显示（电量<=20%时显示）
+    if (battery_capacity <= 20) {
+
+        // 图片已存在，确保显示
+        lv_obj_clear_flag(lowpw_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        // 电量恢复，隐藏低电量图片
+        if (lowpw_img != NULL) {
+            lv_obj_add_flag(lowpw_img, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGI("BATTERY", "Low power warning hidden, capacity=%d%%", battery_capacity);
         }
     }
-    
+
+
+    // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
+    struct timeval tv_now;
+    gettimeofday(&tv_now, NULL);
+    uint32_t uptime_seconds = (uint32_t)tv_now.tv_sec;
+
+    char nus_data[64] = "";  // 增加缓冲区大小以包含电池信息
+    // 根据heartbeat参数决定是否发送心跳包
+    if (g_sys_params.heartbeat_enable) {
+    if( g_sys_params.heartbeat_enable == 2)  g_sys_params.heartbeat_enable = 0;
+        snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu %lu %d%% %dC",
+            macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
+            uptime_seconds, battery_voltage_mv, battery_capacity, (int)tsens_out);
+        send_upload_response(APP_ID_STATUS, (uint8_t*)nus_data, strlen((char*)nus_data));
+    }
+    //屏幕上显示mac等
+    if(g_sys_params.show_mac) {
+        snprintf((char*)nus_data, sizeof(nus_data), "%02X%02X%02X%02X%02X%02X %lu",
+                macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
+                uptime_seconds);
+        lv_label_set_text_fmt(top_label, nus_data);
+        lv_obj_clear_flag(top_label, LV_OBJ_FLAG_HIDDEN);
+        //显示电池电量
+
+
+    } else {
+        lv_obj_add_flag(top_label, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_tick_inc(100);
     lv_task_handler();
     vTaskDelay(pdMS_TO_TICKS(g_sys_params.run_interval));
@@ -2549,26 +2543,11 @@ void writecard_task( void *pvParameters )
               ESP_LOGI(MMC_TAG, "YURIDATA write successful");
             }
 
-            // 使用全局变量 g_write_card_data 中的16字节数据，分4次写入，每次4字节
+            // 使用全局变量 g_write_card_data 中的16字节数据，一次性写入4页（16字节）
             memcpy(cardpid, &g_write_card_data[0], 16);
             if(SI523_write_NTAG(12, cardpid) == MI_OK){
-              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 0-3)");
+              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 0-16)");
             }
-
-            // memcpy(cardpid, &g_write_card_data[4], 4);
-            // if(SI523_write_NTAG(12+4, cardpid) == MI_OK){
-            //   ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 4-7)");
-            // }
-
-            // memcpy(cardpid, &g_write_card_data[8], 4);
-            // if(SI523_write_NTAG(12+8, cardpid) == MI_OK){
-            //   ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 8-11)");
-            // }
-
-            // memcpy(cardpid, &g_write_card_data[12], 4);
-            // if(SI523_write_NTAG(12+12, cardpid) == MI_OK){
-            //   ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 12-15)");
-            // }
 
             if(SI523_read_NTAG(12, cardpid) == MI_OK){
             ESP_LOGI(MMC_TAG, "NTAG0: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
@@ -2584,7 +2563,7 @@ void writecard_task( void *pvParameters )
                      cardpid[8], cardpid[9], cardpid[10], cardpid[11],
                      cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
             send_upload_response(APP_ID_WRITE_CARD, (uint8_t*)response, strlen(response));
-            ESP_LOGI(MMC_TAG, "Card data sent to host");
+            ESP_LOGI(MMC_TAG, "NFC response sent: %s", response);
             break;
             }
         }}
@@ -2705,7 +2684,22 @@ void key_task( void *pvParameters )
     // 处理NFC卡片数据
     process_nfc_data(carduid, cardpid);
 
+    // 检查是否有待发送的NFC响应
+    if(g_nfc_pending_response) {
+        g_nfc_pending_response = false;  // 清除标记位
 
+
+
+        // 返回读取到的数据到上位机
+        char response[64];
+        snprintf(response, sizeof(response), "Read: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                    cardpid[0], cardpid[1], cardpid[2], cardpid[3],
+                    cardpid[4], cardpid[5], cardpid[6], cardpid[7],
+                    cardpid[8], cardpid[9], cardpid[10], cardpid[11],
+                    cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
+        send_upload_response(APP_ID_WRITE_CARD, (uint8_t*)response, strlen(response));
+        ESP_LOGI("NFC", "NFC response sent: %s", response);
+    }
 
 
 
