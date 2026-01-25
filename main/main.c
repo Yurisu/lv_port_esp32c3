@@ -2550,25 +2550,25 @@ void writecard_task( void *pvParameters )
             }
 
             // 使用全局变量 g_write_card_data 中的16字节数据，分4次写入，每次4字节
-            memcpy(cardpid, &g_write_card_data[0], 4);
+            memcpy(cardpid, &g_write_card_data[0], 16);
             if(SI523_write_NTAG(12, cardpid) == MI_OK){
               ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 0-3)");
             }
 
-            memcpy(cardpid, &g_write_card_data[4], 4);
-            if(SI523_write_NTAG(12, cardpid) == MI_OK){
-              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 4-7)");
-            }
+            // memcpy(cardpid, &g_write_card_data[4], 4);
+            // if(SI523_write_NTAG(12+4, cardpid) == MI_OK){
+            //   ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 4-7)");
+            // }
 
-            memcpy(cardpid, &g_write_card_data[8], 4);
-            if(SI523_write_NTAG(12, cardpid) == MI_OK){
-              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 8-11)");
-            }
+            // memcpy(cardpid, &g_write_card_data[8], 4);
+            // if(SI523_write_NTAG(12+8, cardpid) == MI_OK){
+            //   ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 8-11)");
+            // }
 
-            memcpy(cardpid, &g_write_card_data[12], 4);
-            if(SI523_write_NTAG(12, cardpid) == MI_OK){
-              ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 12-15)");
-            }
+            // memcpy(cardpid, &g_write_card_data[12], 4);
+            // if(SI523_write_NTAG(12+12, cardpid) == MI_OK){
+            //   ESP_LOGI(MMC_TAG, "NTAG write successful (bytes 12-15)");
+            // }
 
             if(SI523_read_NTAG(12, cardpid) == MI_OK){
             ESP_LOGI(MMC_TAG, "NTAG0: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);

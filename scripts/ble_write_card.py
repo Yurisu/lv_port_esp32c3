@@ -32,19 +32,25 @@ def checksum16(data: bytes) -> bytes:
 class BLEConnectionManager:
     """BLE连接管理器"""
 
-    def __init__(self, log_callback=None, disconnect_callback=None):
+    def __init__(self, log_callback=None, disconnect_callback=None, read_callback=None):
         self.client = None
         self.device = None
         self.is_connected = False
         self.rx_characteristic = None
         self.log_callback = log_callback
         self.disconnect_callback = disconnect_callback
+        self.read_callback = read_callback
         self.monitoring_task = None
 
     def log(self, message):
         """记录日志"""
         if self.log_callback:
             self.log_callback(message)
+
+    def update_read_display(self, data_text):
+        """更新Read数据显示"""
+        if self.read_callback:
+            self.read_callback(data_text)
 
     async def connect_device(self, address):
         """连接到指定设备"""
@@ -86,7 +92,11 @@ class BLEConnectionManager:
             return success
 
         except Exception as e:
-            self.log(f"✗ 连接错误: {e}")
+            error_msg = str(e)
+            self.log(f"✗ 连接错误: {error_msg}")
+            if "was not found" in error_msg or "not found" in error_msg.lower():
+                self.log(f"⚠ 提示: 这种情况很有可能是设备信号不好或设备断电")
+                self.log(f"⚠ 建议: 1) 请确认设备已上电  2) 尝试将设备靠近电脑  3) 检查是否有干扰")
             return False
 
     async def configure_rx_characteristic(self):
@@ -137,11 +147,72 @@ class BLEConnectionManager:
         """通知处理回调函数"""
         self.log(f"\n[收到通知] 数据长度: {len(data)} 字节")
         self.log(f"  数据内容(hex): {data.hex()}")
+
         try:
-            text = data.decode('utf-8', errors='ignore')
-            self.log(f"  数据内容(text): {text}")
-        except:
-            pass
+            # 解析数据格式: 命令(1字节) + checksum(2字节) + 长度(1字节) + 数据
+            if len(data) >= 4:
+                command = data[0]
+                checksum = data[1:3]
+                length = data[3]
+                payload = data[4:]
+
+                self.log(f"  命令: 0x{command:02X}")
+                self.log(f"  校验和: {checksum.hex()}")
+                self.log(f"  数据长度: {length} 字节")
+
+                # 解析数据内容
+                if len(payload) > 0:
+                    try:
+                        text = payload.decode('utf-8', errors='ignore')
+                        # 清理控制字符
+                        clean_text = ''.join(c if ord(c) >= 32 or c == '\n' else '?' for c in text)
+                        self.log(f"  数据内容(text): {clean_text}")
+
+                        # 特殊处理Read命令数据
+                        if 'Read:' in clean_text:
+                            self.log(f"\n{'='*60}")
+                            self.log("✓ 写卡成功! 收到Read数据:")
+
+                            # 提取十六进制数据
+                            hex_part = clean_text.replace('Read:', '').strip()
+                            self.log(f"  原始数据: {hex_part}")
+
+                            # 解析十六进制数据并格式化显示（传递当前计数+1）
+                            read_count = 0
+                            if self.read_callback and hasattr(self, '_gui_ref') and self._gui_ref:
+                                read_count = self._gui_ref.read_data_count + 1
+
+                            read_display = self.parse_read_data(hex_part, read_count)
+
+                            # 更新Read显示区域
+                            self.update_read_display(read_display)
+
+                            # 尝试将十六进制解析为字节并显示
+                            try:
+                                hex_bytes = bytes.fromhex(hex_part.replace(' ', ''))
+                                self.log(f"  字节值: {hex_bytes.hex()}")
+                                # 尝试解码为文本
+                                try:
+                                    decoded = hex_bytes.decode('utf-8', errors='ignore')
+                                    self.log(f"  解码文本: {decoded}")
+                                except:
+                                    pass
+                            except:
+                                pass
+                            self.log(f"{'='*60}")
+
+                    except Exception as e:
+                        self.log(f"  解析失败: {e}")
+            else:
+                # 短数据直接显示
+                try:
+                    text = data.decode('utf-8', errors='ignore')
+                    self.log(f"  数据内容(text): {text}")
+                except:
+                    pass
+
+        except Exception as e:
+            self.log(f"  解析错误: {e}")
 
     async def send_data(self, data: bytearray):
         """向FFE2(RX)特征发送数据"""
@@ -218,6 +289,19 @@ class BLEConnectionManager:
             if self.disconnect_callback:
                 self.disconnect_callback()
 
+    def parse_read_data(self, hex_part, count):
+        """解析Read数据并格式化显示"""
+        # 清理数据（去除特殊字符）
+        cleaned_hex = hex_part.replace(')', '').replace('(', '').strip()
+
+        # 按空格分割，去除空格后重新格式化为每2字符加空格
+        hex_values = cleaned_hex.replace(' ', '')
+
+        # 格式化为每2字符加空格
+        formatted_hex = ' '.join([hex_values[i:i+2] for i in range(0, len(hex_values), 2)])
+
+        return formatted_hex
+
     async def disconnect(self):
         """断开当前连接"""
         if self.monitoring_task and not self.monitoring_task.done():
@@ -253,12 +337,13 @@ class WriteCardGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("NFC写卡工具")
-        self.root.geometry("700x600")
+        self.root.geometry("900x800")
 
         self.manager = None
         self.loop = None
         self.loop_thread = None
         self.auto_scroll = True
+        self.read_data_count = 0
 
         self.setup_ui()
 
@@ -323,20 +408,45 @@ class WriteCardGUI:
         ttk.Button(write_btn_frame, text="验证数据", command=self.validate_data).pack(side=tk.LEFT, padx=5)
         ttk.Button(write_btn_frame, text="写入NFC卡", command=self.write_card).pack(side=tk.LEFT, padx=5)
 
+        # Read数据显示区域
+        read_frame = ttk.LabelFrame(self.root, text="读取数据", padding=10)
+        read_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Read数据计数和控制按钮
+        read_info_frame = ttk.Frame(read_frame)
+        read_info_frame.pack(fill=tk.X, pady=2)
+        self.read_count_label = ttk.Label(read_info_frame, text="已读取: 0 次")
+        self.read_count_label.pack(side=tk.LEFT)
+        ttk.Button(read_info_frame, text="清空Read数据", command=self.clear_read_data).pack(side=tk.RIGHT)
+
+        # Read数据内容
+        input_frame = ttk.Frame(read_frame)
+        input_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(input_frame, text="数据:").pack(side=tk.LEFT)
+        self.read_text = ttk.Entry(input_frame, width=60, font=("Courier", 10))
+        self.read_text.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.read_text.insert(0, "等待读取数据...")
+
         # 日志显示区域
         log_frame = ttk.LabelFrame(self.root, text="日志输出", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=15, wrap=tk.WORD)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
         # 日志控制按钮
         control_btn_frame = ttk.Frame(log_frame)
-        control_btn_frame.pack(anchor=tk.E)
+        control_btn_frame.pack(fill=tk.X, pady=2)
 
-        ttk.Checkbutton(control_btn_frame, text="自动滚动",
-                      variable=self.create_var_auto_scroll(),
-                      command=self.toggle_auto_scroll).pack(side=tk.LEFT, padx=5)
+        self.scroll_btn = ttk.Button(control_btn_frame, text="停止滚动",
+                                    command=self.toggle_scroll_mode)
+        self.scroll_btn.pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_btn_frame, text="清空日志",
+                  command=self.clear_log).pack(side=tk.LEFT, padx=5)
+
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=12, wrap=tk.WORD)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        self.scroll_btn = ttk.Button(control_btn_frame, text="停止滚动",
+                                    command=self.toggle_scroll_mode)
+        self.scroll_btn.pack(side=tk.LEFT, padx=5)
         ttk.Button(control_btn_frame, text="清空日志",
                   command=self.clear_log).pack(side=tk.LEFT, padx=5)
 
@@ -367,14 +477,30 @@ class WriteCardGUI:
         """清空日志"""
         self.log_text.delete(1.0, tk.END)
 
-    def create_var_auto_scroll(self):
-        """创建自动滚动变量"""
-        self.auto_scroll_var = tk.BooleanVar(value=True)
-        return self.auto_scroll_var
+    def clear_read_data(self):
+        """清空Read数据"""
+        self.read_text.delete(0, tk.END)
+        self.read_text.insert(0, "等待读取数据...")
+        self.read_data_count = 0
+        self.read_count_label.config(text="已读取: 0 次")
 
-    def toggle_auto_scroll(self):
-        """切换自动滚动状态"""
-        self.auto_scroll = self.auto_scroll_var.get()
+    def add_read_data(self, data_text):
+        """添加Read数据"""
+        # 清空所有内容，只显示最新的读取数据
+        self.read_text.delete(0, tk.END)
+        self.read_text.insert(0, data_text)
+        self.read_data_count += 1
+        self.read_count_label.config(text=f"已读取: {self.read_data_count} 次")
+
+    def toggle_scroll_mode(self):
+        """切换滚动模式"""
+        self.auto_scroll = not self.auto_scroll
+        if self.auto_scroll:
+            self.scroll_btn.config(text="停止滚动")
+            self.log("✓ 已启用自动滚动")
+        else:
+            self.scroll_btn.config(text="启用滚动")
+            self.log("✓ 已停止自动滚动")
 
     def run_async(self, coro):
         """在事件循环中运行异步任务"""
@@ -454,31 +580,32 @@ class WriteCardGUI:
             self.log(f"数据长度: {len(data)} 字节")
             self.log(f"HEX格式: {data.hex()}")
             self.log(f"ASCII格式: {data.decode('ascii', errors='replace')}")
-            messagebox.showinfo("验证成功", "数据格式正确!\n长度: 16字节")
+            self.log("✓ 验证成功: 数据格式正确，长度16字节")
         except ValueError as e:
             self.log(f"✗ 数据验证失败: {e}")
-            messagebox.showerror("验证失败", str(e))
         except Exception as e:
             self.log(f"✗ 数据验证失败: {e}")
-            messagebox.showerror("验证失败", f"未知错误: {e}")
 
     def connect_device(self):
         """连接设备"""
         if self.manager and self.manager.is_connected:
-            messagebox.showinfo("提示", "设备已连接!")
+            self.log("⚠ 设备已连接!")
             return
 
         address = self.address_entry.get().strip()
         if not address:
-            messagebox.showerror("错误", "请输入设备地址!")
+            self.log("✗ 错误: 请输入设备地址!")
             return
 
         def connect_task():
             async def do_connect():
                 self.manager = BLEConnectionManager(
                     log_callback=self.log,
-                    disconnect_callback=self.on_disconnect
+                    disconnect_callback=self.on_disconnect,
+                    read_callback=self.add_read_data
                 )
+                # 保存GUI引用以便访问计数器
+                self.manager._gui_ref = self
                 success = await self.manager.connect_device(address)
                 if success:
                     self.root.after(0, lambda: self.update_connection_state(True))
@@ -525,11 +652,13 @@ class WriteCardGUI:
         try:
             data = self.parse_data_input()
         except ValueError as e:
-            messagebox.showerror("错误", f"数据格式错误: {e}")
+            self.log(f"✗ 错误: 数据格式错误 - {e}")
             return
 
-        if not messagebox.askyesno("确认", f"确定要写入以下数据到NFC卡吗?\n\nHEX: {data.hex()}\nASCII: {data.decode('ascii', errors='replace')}"):
-            return
+        self.log(f"\n{'='*60}")
+        self.log("准备写入NFC卡...")
+        self.log(f"HEX: {data.hex()}")
+        self.log(f"ASCII: {data.decode('ascii', errors='replace')}")
 
         def task():
             async def do_write():
@@ -541,7 +670,7 @@ class WriteCardGUI:
     def check_connected(self):
         """检查连接状态"""
         if not (self.manager and self.manager.is_connected):
-            messagebox.showwarning("警告", "请先连接到设备!")
+            self.log("⚠ 警告: 请先连接到设备!")
             return False
         return True
 
