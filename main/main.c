@@ -55,6 +55,7 @@
 #define CMD_DATA_FRAME          0xD2  // 数据帧
 #define CMD_DELETE_FRAME        0xD4  // 删除文件帧
 #define CMD_WRITE_CARD_FRAME    0xB1  // 写卡帧
+#define TRANSFER_TIMEOUT_MS    10000  // 文件传输超时时间（30秒）
 // 系统命令定义（多字节命令）
 #define CMD_SYS_PREFIX          0xEE  // 系统命令前缀
 #define CMD_FORMAT_LEN           7     // 格式化命令长度
@@ -73,6 +74,7 @@
 #define APP_ID_SYSTEM           0xEE  // 系统命令响应（格式化、列出目录、重启等）
 #define APP_ID_SYS_PARAM        0xA0  // 系统参数响应
 #define APP_ID_WRITE_CARD       0xB1  // 写卡响应
+#define APP_ID_HEXAGON_POS      0xCC  // 六边形坐标响应
 
 // 系统参数键定义
 #define NVS_NAMESPACE           "SYS"   // 系统参数命名空间
@@ -100,10 +102,10 @@
 #define NPD_EN_GPIO                    GPIO_NUM_10
 #define LED_BG_GPIO                    GPIO_NUM_6
 #define BATTERY_ADC                    GPIO_NUM_3
+#define POWER_EN_GPIO                    GPIO_NUM_20
 
 #define GPIO_INTERRUPT_PIN             GPIO_NUM_21
 
-extern const lv_img_dsc_t lowpw;
 
 // 协议状态枚举
 typedef enum {
@@ -122,6 +124,7 @@ typedef struct {
     bool file_open;                // 文件是否已打开
     uint32_t max_packet_num;        // 最大接收包号（用于去重）
     bool transfer_error;            // 传输错误标志
+    int64_t last_packet_time;       // 上次接收数据包的时间（毫秒）
 } image_transfer_protocol_t;
 
 // 图片传输协议全局变量
@@ -131,7 +134,8 @@ static image_transfer_protocol_t g_img_protocol = {
     .received_size = 0,
     .file_open = false,
     .max_packet_num = 0,
-    .transfer_error = false
+    .transfer_error = false,
+    .last_packet_time = 0
 };
 
 // 写卡数据全局变量（16字节）
@@ -222,6 +226,7 @@ static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *
 void i2c0_mmc56x3_task( void *pvParameters );
 void key_task( void *pvParameters );
 void writecard_task( void *pvParameters );
+void shutdown_key_task( void *pvParameters );
 
 // NFC数据处理函数
 static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data);
@@ -273,7 +278,7 @@ int True_Heading = 0;
 #include "driver/rmt_tx.h"
 #include "led_strip_encoder.h"
 #define RMT_LED_STRIP_RESOLUTION_HZ 10000000 // 10MHz resolution, 1 tick = 0.1us (led strip needs a high resolution)
-#define RMT_LED_STRIP_GPIO_NUM      6
+#define RMT_LED_STRIP_GPIO_NUM      LED_BG_GPIO
 #define LEDS_COUNT                  1
 uint8_t led_strip_pixels[LEDS_COUNT] = {0};
 uint8_t led_brightness= 100;
@@ -295,8 +300,8 @@ struct capacity {
 static struct capacity battery_capacity_tables[] = {
   /*  capacity, minx, maxx  */
   {0, 3306, 3426},//0red
-  {1, 3427, 3638},//0
-  {10, 3639, 3697}, //0
+  {1, 3427, 3500},//0
+  {10, 3500, 3697}, //0
   {20, 3698, 3729}, //1
   {30, 3730, 3748}, //1
   {40, 3749, 3776}, //2
@@ -422,7 +427,7 @@ const char* hidden_msg2 = "Professional hardware and software solutions availabl
 #define MMC_TAG                       "MMC"
 
 #define KEY_TASK_NAME                 "key_task"
-#define KEY_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 2)
+#define KEY_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 8)
 #define KEY_TASK_PRIORITY             (tskIDLE_PRIORITY + 3)
 #define KEY_TAG                       "KEY"
 
@@ -432,13 +437,15 @@ void BG_EN(int state);
 #define LOW_LEVEL 0
 #define HIGH_LEVEL 1
 
-static volatile uint8_t g_task_running = 0;  // 任务运行标志，防止重复创建
+static volatile uint8_t g_task_running = 1;  // 任务运行标志，防止重复创建
 
 static lv_obj_t *pos_label;
 static lv_obj_t *bg_img;
 static lv_obj_t *bom_img;
-static lv_obj_t *gif_obj;
-static lv_obj_t *lowpw_img = NULL;  // 低电量图片对象
+//static lv_obj_t *gif_obj;
+static lv_obj_t *lowpwpic_img = NULL;  // 低电量图片对象
+
+
 
 // void lv_tick_task(void *arg) {
 //   (void) arg;
@@ -508,20 +515,22 @@ void IIC_init(void) {
 
 
 
+// Shutdown task declaration
+void shutdown_key_task(void *pvParameters);
+
 // GPIO interrupt handler
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     //BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     uint32_t gpio_num = (uint32_t) arg;
 
-    ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!", gpio_num);
+    ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!%d", gpio_num, g_task_running);
 
     // 检查任务是否正在运行，防止重复创建
     if (g_task_running == 0) {
-        g_task_running = 100;
-        // 直接创建一次性任务来处理按键事件
-        xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
-    } 
+        // 启动长按检测任务，会根据按键持续时间决定是关机还是正常按键
+        xTaskCreatePinnedToCore(shutdown_key_task, "shutdown_task", KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
+    }
 
     // 清除中断状态
     gpio_intr_disable(gpio_num);
@@ -539,6 +548,10 @@ void BG_EN(int state)
 {
     gpio_set_level(LED_BG_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
 }
+void PW_EN(int state)
+{
+    gpio_set_level(POWER_EN_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
+}
 // Initialize NPD_EN GPIO10 as output with low level
 static void npd_gpio_init(void)
 {
@@ -549,6 +562,11 @@ static void npd_gpio_init(void)
     gpio_reset_pin(LED_BG_GPIO);
     gpio_set_direction(LED_BG_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(LED_BG_GPIO, LOW_LEVEL);
+        
+    gpio_reset_pin(POWER_EN_GPIO);
+    gpio_set_direction(POWER_EN_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(POWER_EN_GPIO, HIGH_LEVEL);
+    
     
 }
 
@@ -583,6 +601,7 @@ static void reset_protocol_state(void) {
     memset(&g_img_protocol, 0, sizeof(image_transfer_protocol_t));
     g_img_protocol.state = PROTOCOL_STATE_IDLE;
     g_img_protocol.max_packet_num = 0;
+    g_img_protocol.last_packet_time = 0;
     ESP_LOGI("CMDp", "Protocol state reset");
 }
 
@@ -592,14 +611,14 @@ static void load_system_params_from_nvs(void) {
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
     
     if (err == ESP_OK) {
-        int val;
+        int32_t val;
 
         // 指南针偏移
         if (nvs_get_i32(nvs_handle, NVS_KEY_COMP_OFFSET, &val) == ESP_OK) {
             if (val >= 0 && val <= 360) {
                 g_sys_params.comp_offset = (uint16_t)val;
             } else {
-                ESP_LOGW("SYS", "Invalid comp_offset from NVS: %d, using default", val);
+                ESP_LOGW("SYS", "Invalid comp_offset from NVS: %d, using default", (int)val);
             }
         }
 
@@ -608,7 +627,7 @@ static void load_system_params_from_nvs(void) {
             if (val >= 10 && val <= 60000) {
                 g_sys_params.run_interval = (uint16_t)val;
             } else {
-                ESP_LOGW("SYS", "Invalid run_interval from NVS: %d, using default", val);
+                ESP_LOGW("SYS", "Invalid run_interval from NVS: %d, using default", (int)val);
             }
         }
         
@@ -722,6 +741,7 @@ static void save_system_params_to_nvs(void) {
 // 触发测量任务（等同于按键中断中的任务）
 static esp_err_t start_measure_task(bool send_nfc_response)
 {
+    ESP_LOGI("CMDp", "Starting measure task, send_nfc_response=%d", send_nfc_response);
     // 检查任务是否正在运行，防止重复创建
     if (g_task_running) {
         ESP_LOGW("CMDp", "Measure task already running");
@@ -838,6 +858,7 @@ static esp_err_t handle_init_frame(const uint8_t *data, uint16_t length) {
     g_img_protocol.file_open = true;
     g_img_protocol.transfer_error = false;
     g_img_protocol.state = PROTOCOL_STATE_RECEIVING_DATA;
+    g_img_protocol.last_packet_time = esp_timer_get_time() / 1000;  // 设置初始时间戳（毫秒）
 
     ESP_LOGI("CMDp", "File opened for writing - Path: %s, Total size: %lu bytes", filepath, file_size);
 
@@ -1004,6 +1025,7 @@ static esp_err_t handle_data_frame(const uint8_t *data, uint16_t length) {
 
         g_img_protocol.received_size += payload_len;
         g_img_protocol.max_packet_num = packet_num;
+        g_img_protocol.last_packet_time = esp_timer_get_time() / 1000;  // 更新时间戳（毫秒）
 
         ESP_LOGI("CMDp", "Data packet %lu received, payload %d bytes, total %lu/%lu bytes (%.1f%%)",
                  packet_num, payload_len, g_img_protocol.received_size, g_img_protocol.file_size,
@@ -1096,7 +1118,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.comp_offset = (uint16_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid comp_offset value: %d", val);
+            ESP_LOGE("CMDp", "Invalid comp_offset value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1106,7 +1128,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.run_interval = (uint16_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid run_interval value: %d", val);
+            ESP_LOGE("CMDp", "Invalid run_interval value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1116,7 +1138,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.backlight_enable = (uint8_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid backlight value: %d", val);
+            ESP_LOGE("CMDp", "Invalid backlight value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1126,7 +1148,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.bg_image_mode = (uint8_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid bg_mode value: %d", val);
+            ESP_LOGE("CMDp", "Invalid bg_mode value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1136,7 +1158,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.show_mac = (uint8_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid show_mac value: %d", val);
+            ESP_LOGE("CMDp", "Invalid show_mac value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1146,7 +1168,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.pos_label_enable = (uint8_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid pos_label value: %d", val);
+            ESP_LOGE("CMDp", "Invalid pos_label value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1156,7 +1178,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.pos_label_x = (uint8_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid pos_label_x value: %d", val);
+            ESP_LOGE("CMDp", "Invalid pos_label_x value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1166,7 +1188,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             g_sys_params.pos_label_y = (uint8_t)val;
             param_changed = true;
         } else {
-            ESP_LOGE("CMDp", "Invalid pos_label_y value: %d", val);
+            ESP_LOGE("CMDp", "Invalid pos_label_y value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1178,7 +1200,7 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         } else if(val == 2) {
             g_sys_params.heartbeat_enable = (uint8_t)val;
         } else {
-            ESP_LOGE("CMDp", "Invalid heartbeat value: %d", val);
+            ESP_LOGE("CMDp", "Invalid heartbeat value: %d", (int)val);
             return ESP_ERR_INVALID_ARG;
         }
     }
@@ -1277,8 +1299,8 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     if (param_len >= sizeof(key_str)) {
         param_len = sizeof(key_str) - 1;
     }
-    memcpy(key_str, &data[4], param_len);
-    key_str[param_len] = '\0';
+    memcpy(key_str, &data[4], param_len-1);
+    key_str[param_len-1] = '\0';
     
     ESP_LOGI("CMDp", "Get param key: %s", key_str);
     
@@ -1461,34 +1483,29 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
                 strncpy(role_pos, (char*)&card_data[1], 15);
                 // tudo,位置信息需要显示在屏幕上,没有位置时屏幕标签清除
                 ESP_LOGI(NFC_DATA_TAG, "Hexagon position: %s", role_pos);
-                //(APP_ID=0xCC): 角色名称(15字节) + ',' + 角色类型(文件名15字节) + ',' + 角色行动(文件名15字节) + 
-                //',' + 六边形坐标xyz(15字节 无效时传-) + ',' + 指南针真北(4字节 无效时传-1)
-// g_sys_params.role_name
-// g_sys_params.role_type
-// g_sys_params.role_action
+                // g_sys_params.role_name
+                // g_sys_params.role_type
+                // g_sys_params.role_action
+                
+                // 发送六边形坐标响应 (APP_ID=0xCC)
+                // 格式：角色名称(15字节) + ',' + 角色类型(文件名15字节) + ',' + 角色行动(文件名15字节) + ',' + 六边形坐标xyz(15字节 无效时传-) + ',' + 指南针真北(4字节 无效时传-1)
+                char hexagon_response[100];  // 增大到100字节以防止溢出
+                int heading_value = (True_Heading >= 0 && True_Heading <= 360) ? True_Heading : -1;
+                snprintf(hexagon_response, sizeof(hexagon_response), "%s,%s,%s,%s,%d",
+                         g_sys_params.role_name,
+                         g_sys_params.role_type,
+                         g_sys_params.role_action,
+                         role_pos,
+                         heading_value);
+                send_upload_response(APP_ID_HEXAGON_POS, (uint8_t*)hexagon_response, strlen(hexagon_response));
+                ESP_LOGI(NFC_DATA_TAG, "Hexagon response sent: %s (True_Heading=%d)", 
+                         hexagon_response, True_Heading);
 
-
-
-
-
-
-    // 更新位置标签显示
-    lv_label_set_text(pos_label, role_pos);
-    lv_obj_set_style_text_color(pos_label, lv_color_black(), 0);
-    lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
-    lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
-
-
-
-
-
-
-
-
-
- 
-
-
+                // 更新位置标签显示
+                lv_label_set_text(pos_label, role_pos);
+                lv_obj_set_style_text_color(pos_label, lv_color_black(), 0);
+                lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
+                lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
 
             }
             break;
@@ -2009,8 +2026,8 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                 }
                 // 重启命令：0xEE 0x72 0x65 0x73 0x65 0x74 ("reset")
                 else if (length == CMD_RESET_LEN &&
-                         data[1] == 0x72 && data[2] == 0x65 && data[3] == 0x65 &&
-                         data[4] == 0x74) {
+                         data[1] == 0x72 && data[2] == 0x65 && data[3] == 0x73 && data[4] == 0x65 &&
+                         data[5] == 0x74) {
                     ESP_LOGI("CMDp", "Reset command received");
 
                         const char *msg = "Resetting MCU...";
@@ -2113,7 +2130,7 @@ _Noreturn void app_main(void) {
 
 
   // 自动创建任务，按键触发
-  xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+  //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
   fflush(stdout);
@@ -2208,28 +2225,28 @@ vTaskDelay(pdMS_TO_TICKS(100));
       if (ret)
       {
           ESP_LOGE("BLEinit", "%s initialize controller failed", __func__);
-          return;
+          //return;
       }
 
       ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
       if (ret)
       {
           ESP_LOGE("BLEinit", "%s enable controller failed", __func__);
-          return;
+          //return;
       }
 
       ret = esp_bluedroid_init();
       if (ret)
       {
           ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
-          return;
+          //return;
       }
 
       ret = esp_bluedroid_enable();
       if (ret)
       {
           ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
-          return;
+          //return;
       }
 
       if ((ret = esp_hidd_profile_init()) != ESP_OK)
@@ -2331,11 +2348,18 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
 
     
-    ESP_LOGI("SYS", "Run interval: %d seconds", g_sys_params.run_interval);
+    ESP_LOGI("SYS", "Run interval: %d ms", g_sys_params.run_interval);
 
 
 
     // 创建全屏背景图片 (128*128)
+    // bg_img = lv_img_create(lv_scr_act());
+    // char bg_img_path[35];
+    // snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
+    // lv_img_set_src(bg_img, bg_img_path);
+    // lv_obj_set_size(bg_img, LV_HOR_RES, LV_VER_RES);
+    // lv_obj_center(bg_img);
+
     bg_img = lv_img_create(lv_scr_act());
     char bg_img_path[35];
     snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
@@ -2357,12 +2381,17 @@ vTaskDelay(pdMS_TO_TICKS(100));
         // //lv_obj_set_size(gif_obj, 80, 80);
         // lv_obj_align(gif_obj, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
-        // 首次检测到低电量，创建图片对象（只创建一次）
-        lowpw_img = lv_img_create(lv_scr_act());
-        lv_img_set_src(lowpw_img, &lowpw);
-        lv_obj_set_size(lowpw_img, 35, 35);
-        lv_obj_align(lowpw_img, LV_ALIGN_BOTTOM_RIGHT, -15, -15);
-        //lv_obj_hide(lowpw_img);
+
+        // 低电量，创建图片对象
+        LV_IMG_DECLARE(lowpwpic);
+        lowpwpic_img = lv_img_create(lv_scr_act());
+        lv_img_set_src(lowpwpic_img, &lowpwpic);
+        lv_obj_set_size(lowpwpic_img, 35, 35);
+        lv_obj_align(lowpwpic_img, LV_ALIGN_CENTER, 0, 0);
+        // 设置图片为红色
+        lv_obj_set_style_img_recolor(lowpwpic_img, lv_color_hex(0xFF0000), 0);
+        lv_obj_set_style_img_recolor_opa(lowpwpic_img, LV_OPA_COVER, 0);
+        //lv_obj_hide(lowpwpic_img);
 
     // 创建top标签
     static lv_obj_t *top_label;
@@ -2375,17 +2404,10 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
     // 创建信息标签
     pos_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(pos_label, "4444");
+    lv_label_set_text(pos_label, "----");
     lv_obj_set_style_text_color(pos_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
-    if(g_sys_params.pos_label_enable) {
-        lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
-        ESP_LOGI("SYS", "Pos label: %s at (%d, %d)", 
-             g_sys_params.pos_label_enable ? "ON" : "OFF",
-             g_sys_params.pos_label_x, g_sys_params.pos_label_y);
-    } else {
-        lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x+128, g_sys_params.pos_label_y);
-    }
+    lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
 
 
     temperature_sensor_handle_t temp_handle = NULL;
@@ -2393,7 +2415,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_handle));
 
 
-
+    g_task_running = 0;
 
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());    
@@ -2409,12 +2431,30 @@ vTaskDelay(pdMS_TO_TICKS(100));
     int battery_capacity = battery_calculate_capacity(battery_voltage_mv);
 
     // 低电量检测和图片显示（电量<=20%时显示）
-    if (battery_capacity <= 20) {
+    if (battery_capacity <= 15) {
         // 图片已存在，确保显示
-        lv_obj_clear_flag(lowpw_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(lowpwpic_img, LV_OBJ_FLAG_HIDDEN);
+        if(battery_capacity <= 1)
+        {
+            //关机
+            ESP_LOGE("Battery", "Battery critically low: %lu mV %d%%, shutting down...", battery_voltage_mv, battery_capacity);
+            //esp_deep_sleep_start();
+            PW_EN(0);
+        }
     } else {
         // 电量恢复，隐藏低电量图片
-        lv_obj_add_flag(lowpw_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lowpwpic_img, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 文件传输超时检查
+    if (g_img_protocol.state == PROTOCOL_STATE_RECEIVING_DATA && g_img_protocol.last_packet_time > 0) {
+        int64_t current_time = esp_timer_get_time() / 1000;  // 当前时间（毫秒）
+        int64_t elapsed_time = current_time - g_img_protocol.last_packet_time;
+
+        if (elapsed_time > TRANSFER_TIMEOUT_MS) {
+            ESP_LOGE("CMDp", "File transfer timeout: %lld ms elapsed, resetting...", elapsed_time);
+            reset_protocol_state();
+        }
     }
 
     // 背光控制
@@ -2460,7 +2500,47 @@ vTaskDelay(pdMS_TO_TICKS(100));
     }
     lv_tick_inc(100);
     lv_task_handler();
-    vTaskDelay(pdMS_TO_TICKS(g_sys_params.run_interval));
+    
+    // 检查是否可以进入 light sleep
+    bool can_sleep = true;
+    
+    // 检查1: 文件传输正在进行时不睡眠
+    if (g_img_protocol.state == PROTOCOL_STATE_RECEIVING_DATA) {
+        can_sleep = false;
+        ESP_LOGD("SLEEP", "Cannot sleep: file transfer in progress");
+    }
+    
+    // 检查2: 有蓝牙连接时不睡眠（避免中断通信）
+    if (sec_conn) {
+        can_sleep = false;
+        ESP_LOGD("SLEEP", "Cannot sleep: Bluetooth connected");
+    }
+    
+    // 检查3: run_interval 太短时不睡眠（LVGL需要定期更新）
+    if (g_sys_params.run_interval < 500) {
+        can_sleep = false;
+        ESP_LOGD("SLEEP", "Cannot sleep: run_interval too short (%d ms)", g_sys_params.run_interval);
+    }
+    
+    if (0) { //can_sleep
+        // 配置 light sleep
+        esp_sleep_enable_timer_wakeup(g_sys_params.run_interval * 5000);  // 单位：微秒
+        
+        // 保持关键引脚电平，防止设备断电
+        gpio_hold_en(LED_BG_GPIO);    // 保持背光使能引脚
+        gpio_hold_en(POWER_EN_GPIO);  // 保持电源使能引脚
+        
+        // 进入 light sleep
+        ESP_LOGI("SLEEP", "Entering light sleep for %d ms", g_sys_params.run_interval);
+        esp_light_sleep_start();
+        
+        // 唤醒后解除引脚保持
+        //gpio_hold_dis(LED_BG_GPIO);
+        //gpio_hold_dis(POWER_EN_GPIO);
+    } else {
+        // 不能睡眠时使用普通的 vTaskDelay
+        vTaskDelay(pdMS_TO_TICKS(g_sys_params.run_interval));
+    }
 
   }
 
@@ -2608,6 +2688,54 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
 
     g_task_running=3;
     vTaskDelete( NULL );
+}
+
+// 长按关机检测任务
+void shutdown_key_task(void *pvParameters)
+{
+    (void)pvParameters;
+    int hold_time = 0;
+
+
+    // 每100ms检测一次按键状态，最多检测30次（3秒）
+    while (hold_time < 30) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // 读取按键状态（按下是高电平）
+        int button_level = gpio_get_level(GPIO_INTERRUPT_PIN);
+
+        if (button_level == 0) {
+            // 按键已释放（短按），触发正常按键功能
+            ESP_LOGI("SHUTDOWN", "Button released after %d00ms", hold_time);
+            if(g_task_running == 0){
+                g_task_running = 100;
+                vTaskDelay(pdMS_TO_TICKS(100));//等待稳定
+                xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
+            }
+            vTaskDelete(NULL);
+            return;
+        }
+
+        hold_time++;
+    }
+
+    // 长按超过3秒，执行关机
+    ESP_LOGI("SHUTDOWN", "Long press detected (>3s), shutting down...");
+
+    // 关闭背光和电源
+    BG_EN(0);      // 关闭背光
+    PW_EN(0);     // 关闭电源
+
+    // 等待按键释放
+    ESP_LOGI("SHUTDOWN", "Waiting for button release...");
+    while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
+    }
+
+    ESP_LOGI("SHUTDOWN", "Button long released, powering off...");
+
+    // 芯片会自然断电（因为 PW_EN 已经关闭）
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    
 }
 
 void key_task( void *pvParameters )

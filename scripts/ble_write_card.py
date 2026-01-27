@@ -324,7 +324,18 @@ class BLEConnectionManager:
         # 格式化为每2字符加空格
         formatted_hex = ' '.join([hex_values[i:i+2] for i in range(0, len(hex_values), 2)])
 
-        return formatted_hex
+        # 尝试解码为ASCII文本
+        ascii_text = ""
+        try:
+            # 将十六进制转换为字节，然后解码为ASCII
+            hex_bytes = bytes.fromhex(hex_values)
+            ascii_text = hex_bytes.decode('utf-8', errors='replace')
+            # 替换不可打印字符为点
+            ascii_text = ''.join(c if 32 <= ord(c) < 127 else '.' for c in ascii_text)
+        except:
+            ascii_text = "无法解析"
+
+        return formatted_hex, ascii_text
 
     async def disconnect(self):
         """断开当前连接"""
@@ -415,9 +426,12 @@ class WriteCardGUI:
         template_frame = ttk.Frame(data_frame)
         template_frame.pack(fill=tk.X, pady=5)
         ttk.Label(template_frame, text="快速模板:").pack(side=tk.LEFT)
-        ttk.Button(template_frame, text="六边形坐标(0,0,0)", command=lambda: self.load_template("hex", "01 00 00 00")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(template_frame, text="角色类型", command=lambda: self.load_template("hex", "02 00 00 00")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(template_frame, text="清空数据", command=lambda: self.load_template("hex", "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(template_frame, text="六边形坐标0x31(65,43,21)", command=lambda: self.load_template("ascii", "1654321")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(template_frame, text="角色名称0x32", command=lambda: self.load_template("ascii", "21121")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(template_frame, text="角色类型0x33", command=lambda: self.load_template("ascii", "3t-1.sjpg")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(template_frame, text="角色行动0x34", command=lambda: self.load_template("ascii", "4b-1.sjpg")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(template_frame, text="校准指南针0x11", command=lambda: self.load_template("hex", "11 21 31 00 00 00 00 00 00 00 00 00 00 00 00 00")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(template_frame, text="清空输入", command=lambda: self.load_template("hex", "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")).pack(side=tk.LEFT, padx=2)
 
         # 数据预览
         preview_frame = ttk.Frame(data_frame)
@@ -429,8 +443,8 @@ class WriteCardGUI:
         # 写卡按钮
         write_btn_frame = ttk.Frame(data_frame)
         write_btn_frame.pack(fill=tk.X, pady=10)
-        ttk.Button(write_btn_frame, text="读取NFC卡", command=self.read_nfc_card).pack(side=tk.LEFT, padx=5)
-        ttk.Button(write_btn_frame, text="写入NFC卡", command=self.write_card).pack(side=tk.LEFT, padx=5)
+        ttk.Button(write_btn_frame, text="读取标签", command=self.read_nfc_card).pack(side=tk.LEFT, padx=5)
+        ttk.Button(write_btn_frame, text="写入标签", command=self.write_card).pack(side=tk.LEFT, padx=5)
 
         # Read数据显示区域
         read_frame = ttk.LabelFrame(self.root, text="读取数据", padding=10)
@@ -443,30 +457,32 @@ class WriteCardGUI:
         self.read_count_label.pack(side=tk.LEFT)
         ttk.Button(read_info_frame, text="清空Read数据", command=self.clear_read_data).pack(side=tk.RIGHT)
 
-        # Read数据内容
+        # Read数据内容 - HEX
         input_frame = ttk.Frame(read_frame)
         input_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(input_frame, text="数据:").pack(side=tk.LEFT)
+        ttk.Label(input_frame, text="HEX:").pack(side=tk.LEFT)
         self.read_text = ttk.Entry(input_frame, width=60, font=("Courier", 10))
         self.read_text.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.read_text.insert(0, "等待读取数据...")
 
+        # Read数据内容 - ASCII
+        ascii_frame = ttk.Frame(read_frame)
+        ascii_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(ascii_frame, text="ASCII:").pack(side=tk.LEFT)
+        self.read_ascii_text = ttk.Entry(ascii_frame, width=60, font=("Courier", 10))
+        self.read_ascii_text.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.read_ascii_text.insert(0, "等待读取数据...")
+
         # 日志显示区域
         log_frame = ttk.LabelFrame(self.root, text="日志输出", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=12, wrap=tk.WORD)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.insert(tk.END, "等待读取数据... \n 角色名称=部队编号1营1连2排1班,角色类型=坦克/无人机,角色行动=攻击/侦察,六边形坐标=横65纵43高程21,校准指南针=以读取这个标签时的角度为0度")
 
         # 日志控制按钮
         control_btn_frame = ttk.Frame(log_frame)
         control_btn_frame.pack(fill=tk.X, pady=2)
-
-        self.scroll_btn = ttk.Button(control_btn_frame, text="停止滚动",
-                                    command=self.toggle_scroll_mode)
-        self.scroll_btn.pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_btn_frame, text="清空日志",
-                  command=self.clear_log).pack(side=tk.LEFT, padx=5)
-
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=12, wrap=tk.WORD)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
 
         self.scroll_btn = ttk.Button(control_btn_frame, text="停止滚动",
                                     command=self.toggle_scroll_mode)
@@ -505,14 +521,27 @@ class WriteCardGUI:
         """清空Read数据"""
         self.read_text.delete(0, tk.END)
         self.read_text.insert(0, "等待读取数据...")
+        self.read_ascii_text.delete(0, tk.END)
+        self.read_ascii_text.insert(0, "等待读取数据...")
         self.read_data_count = 0
         self.read_count_label.config(text="已读取: 0 次")
 
     def add_read_data(self, data_text):
         """添加Read数据"""
         # 清空所有内容，只显示最新的读取数据
-        self.read_text.delete(0, tk.END)
-        self.read_text.insert(0, data_text)
+        if isinstance(data_text, tuple):
+            # 接收到元组 (hex, ascii)
+            hex_text, ascii_text = data_text
+            self.read_text.delete(0, tk.END)
+            self.read_text.insert(0, hex_text)
+            self.read_ascii_text.delete(0, tk.END)
+            self.read_ascii_text.insert(0, ascii_text)
+        else:
+            # 兼容旧格式（只有hex）
+            self.read_text.delete(0, tk.END)
+            self.read_text.insert(0, data_text)
+            self.read_ascii_text.delete(0, tk.END)
+            self.read_ascii_text.insert(0, "")
         self.read_data_count += 1
         self.read_count_label.config(text=f"已读取: {self.read_data_count} 次")
 

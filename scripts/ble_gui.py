@@ -307,6 +307,62 @@ class BLEConnectionManager:
             self.log(f"✗ 发送系统命令失败: {e}")
             return False
 
+    async def send_get_param(self, param_key: str):
+        """发送获取参数命令（0xA2）"""
+        self.log(f"\n{'='*60}")
+        self.log("发送获取参数命令 (0xA2)")
+        self.log(f"{'='*60}")
+
+        try:
+            param_bytes = (param_key + "?").encode('ascii')
+            param_len = len(param_bytes)
+
+            # 构建待校验数据：长度 + 参数
+            checksum_data = bytes([param_len]) + param_bytes
+            checksum = checksum16(checksum_data)
+
+            # 组装帧：命令(0xA2) + checksum(2字节) + 长度(1字节) + 参数
+            frame = bytes([0xA2]) + checksum + bytes([param_len]) + param_bytes
+
+            self.log(f"参数名: {param_key}")
+            self.log(f"帧(hex): {frame.hex()}")
+
+            success = await self.send_data(frame)
+            return success
+
+        except Exception as e:
+            self.log(f"✗ 发送获取参数命令失败: {e}")
+            return False
+
+    async def send_set_param(self, param_key: str, param_value: str):
+        """发送设置参数命令（0xA1）"""
+        self.log(f"\n{'='*60}")
+        self.log("发送设置参数命令 (0xA1)")
+        self.log(f"{'='*60}")
+
+        try:
+            param_str = f"{param_key}={param_value}"
+            param_bytes = param_str.encode('ascii')
+            param_len = len(param_bytes)
+
+            # 构建待校验数据：长度 + 参数
+            checksum_data = bytes([param_len]) + param_bytes
+            checksum = checksum16(checksum_data)
+
+            # 组装帧：命令(0xA1) + checksum(2字节) + 长度(1字节) + 参数
+            frame = bytes([0xA1]) + checksum + bytes([param_len]) + param_bytes
+
+            self.log(f"参数名: {param_key}")
+            self.log(f"参数值: {param_value}")
+            self.log(f"帧(hex): {frame.hex()}")
+
+            success = await self.send_data(frame)
+            return success
+
+        except Exception as e:
+            self.log(f"✗ 发送设置参数命令失败: {e}")
+            return False
+
     async def send_image_file(self, filepath: str):
         """发送图片文件"""
         self.log(f"\n{'='*60}")
@@ -506,6 +562,43 @@ class BLEGUI:
         ttk.Button(sys_btn_frame, text="格式化文件系统", command=self.send_format).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="列出目录", command=self.send_dir).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="重启MCU", command=self.send_reset).pack(side=tk.LEFT, padx=5)
+
+        # 系统参数面板
+        param_frame = ttk.LabelFrame(self.root, text="系统参数", padding=10)
+        param_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # 参数选择
+        param_select_frame = ttk.Frame(param_frame)
+        param_select_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(param_select_frame, text="选择参数:").pack(side=tk.LEFT)
+        
+        # 参数列表
+        param_options = [
+            "heartbeat", "run_interval", "show_mac", "backlight", "bg_mode",
+            "pos_label", "pos_label_x", "pos_label_y", "role_name", 
+            "role_type", "role_action", "Comp", "True_Head", "Comp_offset"
+        ]
+        self.param_combo = ttk.Combobox(param_select_frame, values=param_options, width=15, state="readonly")
+        self.param_combo.pack(side=tk.LEFT, padx=5)
+        self.param_combo.current(0)
+        self.param_combo.bind("<<ComboboxSelected>>", self.on_param_selected)
+
+        # 值输入框
+        ttk.Label(param_select_frame, text="参数值:").pack(side=tk.LEFT)
+        self.param_value_entry = ttk.Entry(param_select_frame, width=20)
+        self.param_value_entry.pack(side=tk.LEFT, padx=5)
+
+        # 读取和写入按钮
+        param_btn_frame = ttk.Frame(param_frame)
+        param_btn_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(param_btn_frame, text="读取参数", command=self.read_param).pack(side=tk.LEFT, padx=5)
+        ttk.Button(param_btn_frame, text="写入参数", command=self.write_param).pack(side=tk.LEFT, padx=5)
+
+        # 参数说明标签
+        param_info_frame = ttk.Frame(param_frame)
+        param_info_frame.pack(fill=tk.X, pady=5)
+        self.param_info_label = ttk.Label(param_info_frame, text="参数说明: 心跳包开关 (0=关闭, 1=开启)")
+        self.param_info_label.pack(anchor=tk.W)
 
         # 文件操作面板
         file_frame = ttk.LabelFrame(self.root, text="文件操作", padding=10)
@@ -756,6 +849,81 @@ class BLEGUI:
             async def do_send():
                 await self.manager.send_image_file(filepath)
             self.run_async(do_send())
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def on_param_selected(self, event):
+        """参数选择变化时的回调"""
+        param_name = self.param_combo.get()
+        info_text = self.get_param_info(param_name)
+        self.param_info_label.config(text=f"参数说明: {info_text}")
+
+    def get_param_info(self, param_name: str) -> str:
+        """获取参数说明"""
+        param_info = {
+            "heartbeat": "心跳包开关 (0=关闭, 1=开启)",
+            "run_interval": "运行间隙（秒）范围: 10~60000",
+            "show_mac": "显示MAC (0=关闭, 1=开启)",
+            "backlight": "背光开关 (0=关闭, 1=开启)",
+            "bg_mode": "底图模式 (1=1张128*128, 0=2张128*64)",
+            "pos_label": "显示位置标签 (0=关闭, 1=开启)",
+            "pos_label_x": "位置标签X坐标 (范围: 0~128)",
+            "pos_label_y": "位置标签Y坐标 (范围: 0~128)",
+            "role_name": "角色名称 (字符串, 长度<20)",
+            "role_type": "角色类型 (字符串, 长度<20)",
+            "role_action": "角色行动 (字符串, 长度<20)",
+            "Comp": "指南针方向 (只读, 0~360)",
+            "True_Head": "指南针真北 (只读, 0~360)",
+            "Comp_offset": "指南针偏移 (范围: 0~360)"
+        }
+        return param_info.get(param_name, "未知参数")
+
+    def read_param(self):
+        """读取参数"""
+        if not self.check_connected():
+            return
+
+        param_name = self.param_combo.get()
+        if not param_name:
+            messagebox.showerror("错误", "请选择参数!")
+            return
+
+        def task():
+            async def do_read():
+                await self.manager.send_get_param(param_name)
+            self.run_async(do_read())
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def write_param(self):
+        """写入参数"""
+        if not self.check_connected():
+            return
+
+        param_name = self.param_combo.get()
+        param_value = self.param_value_entry.get().strip()
+
+        if not param_name:
+            messagebox.showerror("错误", "请选择参数!")
+            return
+
+        if not param_value:
+            messagebox.showerror("错误", "请输入参数值!")
+            return
+
+        # 验证只读参数
+        readonly_params = ["Comp", "True_Head", "role_pos"]
+        if param_name in readonly_params:
+            messagebox.showerror("错误", f"参数 '{param_name}' 是只读参数, 不能写入!")
+            return
+
+        if not messagebox.askyesno("确认", f"确定要设置参数 '{param_name} = {param_value}' 吗?"):
+            return
+
+        def task():
+            async def do_write():
+                await self.manager.send_set_param(param_name, param_value)
+            self.run_async(do_write())
 
         threading.Thread(target=task, daemon=True).start()
 
