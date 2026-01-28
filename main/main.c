@@ -2149,7 +2149,6 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                     ESP_LOGI("CMDp", "PM config command received");
                     pm_config.light_sleep_enable = false;
                     ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
-
                     
                 }
                 else {
@@ -2775,40 +2774,15 @@ vTaskDelay(pdMS_TO_TICKS(100));
     
 
     
-    if (0) { //can_sleep
-        // 配置 light sleep 唤醒源
-        // 1. Timer 唤醒（周期性唤醒）
-        esp_sleep_enable_timer_wakeup(g_sys_params.run_interval * 5000);  // 单位：微秒
-        // 2. GPIO 唤醒（按键中断立即唤醒）
-        // esp_sleep_enable_gpio_wakeup 已在 gpio_interrupt_init() 中配置
-        esp_sleep_enable_gpio_wakeup();
 
-
-        // 进入 light sleep
-        // ESP_LOGI("SLEEP", "Entering light sleep for %d ms (timer + GPIO %d wake-up)", 
-        //          g_sys_params.run_interval, GPIO_INTERRUPT_PIN);
-        esp_light_sleep_start();
-
-        // 检查唤醒原因
-        // esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
-        // if (wakeup_cause == ESP_SLEEP_WAKEUP_GPIO) {
-        //     ESP_LOGI("SLEEP", "Woke up by GPIO %d (button press)", GPIO_INTERRUPT_PIN);
-        // } else if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
-        //     ESP_LOGD("SLEEP", "Woke up by timer");
-        // }
-
-        // 唤醒后解除引脚保持
-        //gpio_hold_dis(LED_BG_GPIO);
-        //gpio_hold_dis(POWER_EN_GPIO);
-    } else {
-        // 不能睡眠时使用普通的 vTaskDelay
-        uint32_t intervaltime = g_sys_params.run_interval/20;
-        while(intervaltime){
-            vTaskDelay(pdMS_TO_TICKS(20));
-            if(g_task_running || gpio_get_level(GPIO_INTERRUPT_PIN)) break;
-            else intervaltime--;
-        }
+    // 蓝牙更新界面的时候要马上退出
+    uint32_t intervaltime = g_sys_params.run_interval/20;
+    while(intervaltime){
+        vTaskDelay(pdMS_TO_TICKS(20));
+        if(g_task_running || gpio_get_level(GPIO_INTERRUPT_PIN)) break;
+        else intervaltime--;
     }
+    
 
   }
 
