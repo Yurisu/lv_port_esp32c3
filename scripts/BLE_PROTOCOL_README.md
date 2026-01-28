@@ -89,9 +89,9 @@
 | pos_label_x | uint8_t | 0~128 | 位置标签X坐标 |
 | pos_label_y | uint8_t | 0~128 | 位置标签Y坐标 |
 | role_name | string | 长度<20 | 角色名称 |
-| role_name_label | uint8_t | 0或1 | 显示角色名称标签：0=关闭, 1=开启 |
-| role_name_label_x | uint8_t | 0~128 | 角色名称标签X坐标 |
-| role_name_label_y | uint8_t | 0~128 | 角色名称标签Y坐标 |
+| rolename_label | uint8_t | 0或1 | 显示角色名称标签：0=关闭, 1=开启 |
+| rolename_label_x | uint8_t | 0~128 | 角色名称标签X坐标 |
+| rolename_label_y | uint8_t | 0~128 | 角色名称标签Y坐标 |
 | role_type | string | 长度<20 | 角色类型 |
 | role_action | string | 长度<20 | 角色行动 |
 | Comp | uint16_t | 0~360 | 指南针方向（只读）同时返回Comp+True_Head |

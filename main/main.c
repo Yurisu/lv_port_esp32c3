@@ -55,7 +55,7 @@
 #define CMD_DATA_FRAME          0xD2  // 数据帧
 #define CMD_DELETE_FRAME        0xD4  // 删除文件帧
 #define CMD_WRITE_CARD_FRAME    0xB1  // 写卡帧
-#define TRANSFER_TIMEOUT_MS    10000  // 文件传输超时时间（30秒）
+#define TRANSFER_TIMEOUT_MS    10000  // 文件传输超时时间（10秒）
 // 系统命令定义（多字节命令）
 #define CMD_SYS_PREFIX          0xEE  // 系统命令前缀
 #define CMD_FORMAT_LEN           7     // 格式化命令长度
@@ -66,7 +66,7 @@
 #define CMD_SET_PARAM          0xA1  // 设置系统参数
 #define CMD_GET_PARAM          0xA2  // 获取系统参数
 #define MAX_FILENAME_LEN        20
-#define MAX_FILE_SIZE           1024 * 1024  // 最大1MB
+#define MAX_FILE_SIZE           1024 * 100  // 最大100k
 
 // 回传协议应用ID定义（从0x01开始）
 #define APP_ID_STATUS           0x01  // 状态信息（MAC地址、运行时间等）
@@ -77,7 +77,7 @@
 #define APP_ID_HEXAGON_POS      0xCC  // 六边形坐标响应
 
 // 系统参数键定义
-#define NVS_NAMESPACE           "SYS"   // 系统参数命名空间
+#define NVS_NAMESPACE           "SYS"               // 系统参数命名空间
 #define NVS_KEY_COMP_OFFSET    "comp_offset"       // 指南针偏移
 #define NVS_KEY_RUN_INTERVAL    "run_interval"     // 运行间隙
 #define NVS_KEY_BACKLIGHT       "backlight"         // 背光开关
@@ -86,6 +86,9 @@
 #define NVS_KEY_POS_LABEL_EN    "pos_label_en"      // 位置标签开关
 #define NVS_KEY_POS_LABEL_X    "pos_label_x"       // 位置标签x
 #define NVS_KEY_POS_LABEL_Y    "pos_label_y"       // 位置标签y
+#define NVS_KEY_ROLNAME_LABEL_EN    "rolename_label_en"      // 角色名标签开关
+#define NVS_KEY_ROLNAME_LABEL_X    "rolename_label_x"       // 角色名标签x
+#define NVS_KEY_ROLNAME_LABEL_Y    "rolename_label_y"       // 角色名标签y
 #define NVS_KEY_HEARTBEAT      "heartbeat"         // 心跳包开关
 #define NVS_KEY_role_type      "role_type"        // 图1文件名,角色类型
 #define NVS_KEY_role_action      "role_action"        // 图2文件名,角色行动
@@ -157,6 +160,9 @@ typedef struct {
     uint8_t pos_label_enable;     // 位置标签：0=关闭, 1=开启
     uint8_t pos_label_x;         // 位置标签x：0~128
     uint8_t pos_label_y;         // 位置标签y：0~128
+    uint8_t rolename_label_enable;     // 位置标签：0=关闭, 1=开启
+    uint8_t rolename_label_x;         // 位置标签x：0~128
+    uint8_t rolename_label_y;         // 位置标签y：0~128
     uint8_t heartbeat_enable;      // 心跳包：0=关闭, 1=开启
     char role_type[20];         // 图1显示图片文件名（长度<20
     char role_action[20];         // 图2显示图片文件名（长度<20）
@@ -172,6 +178,9 @@ static system_params_t g_sys_params = {
     .pos_label_enable = 1,     // 默认1
     .pos_label_x = 36,            // 默认
     .pos_label_y = 100,           // 默认
+    .rolename_label_enable = 1,   // 默认开启
+    .rolename_label_x = 36,        // 默认
+    .rolename_label_y = 10,        // 默认
     .heartbeat_enable = 1,          // 默认开启心跳包
     .role_type = "t-3.jpg",      // 默认图1文件名,默认角色类型
     .role_action = "b-3.jpg",       // 默认图2文件名,默认角色行动
@@ -226,7 +235,6 @@ static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *
 void i2c0_mmc56x3_task( void *pvParameters );
 void key_task( void *pvParameters );
 void writecard_task( void *pvParameters );
-void shutdown_key_task( void *pvParameters );
 
 // NFC数据处理函数
 static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data);
@@ -440,6 +448,7 @@ void BG_EN(int state);
 static volatile uint8_t g_task_running = 1;  // 任务运行标志，防止重复创建
 
 static lv_obj_t *pos_label;
+static lv_obj_t *rolename_label;
 static lv_obj_t *bg_img;
 static lv_obj_t *bom_img;
 //static lv_obj_t *gif_obj;
@@ -515,27 +524,24 @@ void IIC_init(void) {
 
 
 
-// Shutdown task declaration
-void shutdown_key_task(void *pvParameters);
-
 // GPIO interrupt handler
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     //BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     uint32_t gpio_num = (uint32_t) arg;
-
-    ESP_EARLY_LOGI(GPIO_INTERRUPT_TAG, "GPIO %ld interrupt triggered!%d", gpio_num, g_task_running);
-
+    // 清除中断状态
     // 检查任务是否正在运行，防止重复创建
     if (g_task_running == 0) {
-        // 启动长按检测任务，会根据按键持续时间决定是关机还是正常按键
-        xTaskCreatePinnedToCore(shutdown_key_task, "shutdown_task", KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
+        // 立即设置标志位，防止任务创建和启动之间的时间窗口内再次触发中断
+        g_task_running = 1;  // 标记为正在运行（任务启动后会设置为100）
+        // 启动按键任务，会根据按键持续时间决定是关机还是正常按键
+        xTaskCreatePinnedToCore(key_task, "key_task", KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
     }
-
-    // 清除中断状态
     gpio_intr_disable(gpio_num);
-    //ets_delay_us(10); // Simple debounce
+
     gpio_intr_enable(gpio_num);
+    portYIELD_FROM_ISR();
+
 }
 
 
@@ -665,6 +671,25 @@ static void load_system_params_from_nvs(void) {
             }
         }
 
+        // 角色名标签开关
+        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_EN, &val) == ESP_OK) {
+            g_sys_params.rolename_label_enable = (val != 0) ? 1 : 0;
+        }
+
+        // 角色名标签X
+        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_X, &val) == ESP_OK) {
+            if (val >= 0 && val <= 128) {
+                g_sys_params.rolename_label_x = (uint8_t)val;
+            }
+        }
+
+        // 角色名标签Y
+        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_Y, &val) == ESP_OK) {
+            if (val >= 0 && val <= 128) {
+                g_sys_params.rolename_label_y = (uint8_t)val;
+            }
+        }
+
         // 心跳包开关
         if (nvs_get_i32(nvs_handle, NVS_KEY_HEARTBEAT, &val) == ESP_OK) {
             g_sys_params.heartbeat_enable = (val != 0) ? 1 : 0;
@@ -726,6 +751,9 @@ static void save_system_params_to_nvs(void) {
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_EN, g_sys_params.pos_label_enable);
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_X, g_sys_params.pos_label_x);
         nvs_set_i32(nvs_handle, NVS_KEY_POS_LABEL_Y, g_sys_params.pos_label_y);
+        nvs_set_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_EN, g_sys_params.rolename_label_enable);
+        nvs_set_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_X, g_sys_params.rolename_label_x);
+        nvs_set_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_Y, g_sys_params.rolename_label_y);
         nvs_set_i32(nvs_handle, NVS_KEY_HEARTBEAT, g_sys_params.heartbeat_enable);
         nvs_set_str(nvs_handle, NVS_KEY_role_type, g_sys_params.role_type);
         nvs_set_str(nvs_handle, NVS_KEY_role_action, g_sys_params.role_action);
@@ -1192,6 +1220,36 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
             return ESP_ERR_INVALID_ARG;
         }
     }
+    else if (strcmp(key, "rolename_label") == 0) {
+        int val = atoi(value);
+        if (val == 0 || val == 1) {
+            g_sys_params.rolename_label_enable = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid rolename_label value: %d", (int)val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "rolename_label_x") == 0) {
+        int val = atoi(value);
+        if (val >= 0 && val <= 128) {
+            g_sys_params.rolename_label_x = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid rolename_label_x value: %d", (int)val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    else if (strcmp(key, "rolename_label_y") == 0) {
+        int val = atoi(value);
+        if (val >= 0 && val <= 128) {
+            g_sys_params.rolename_label_y = (uint8_t)val;
+            param_changed = true;
+        } else {
+            ESP_LOGE("CMDp", "Invalid rolename_label_y value: %d", (int)val);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
     else if (strcmp(key, "heartbeat") == 0) {
         int val = atoi(value);
         if (val == 0 || val == 1) {
@@ -1329,6 +1387,15 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     }
     else if (strcmp(key_str, "pos_label_y") == 0) {
         snprintf(response, sizeof(response), "pos_label_y=%d", g_sys_params.pos_label_y);
+    }
+    else if (strcmp(key_str, "rolename_label") == 0) {
+        snprintf(response, sizeof(response), "rolename_label=%d", g_sys_params.rolename_label_enable);
+    }
+    else if (strcmp(key_str, "rolename_label_x") == 0) {
+        snprintf(response, sizeof(response), "rolename_label_x=%d", g_sys_params.rolename_label_x);
+    }
+    else if (strcmp(key_str, "rolename_label_y") == 0) {
+        snprintf(response, sizeof(response), "rolename_label_y=%d", g_sys_params.rolename_label_y);
     }
     else if (strcmp(key_str, "heartbeat") == 0) {
         snprintf(response, sizeof(response), "heartbeat=%d", g_sys_params.heartbeat_enable);
@@ -1507,22 +1574,31 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
                 lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
                 lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
 
+
+            } else {
+                // 清除位置标签
+                lv_label_set_text(pos_label, "----");
             }
             break;
         }
 
         case 0x32:  // 角色名称
         {
-            // 将角色名称写入card_data
             strncpy(g_sys_params.role_name, (char*)&card_data[1], 15);
             save_system_params_to_nvs();
+
+            // 更新角色名标签显示
+            lv_label_set_text(rolename_label, g_sys_params.role_name);
+            lv_obj_set_style_text_color(rolename_label, lv_color_black(), 0);
+            lv_obj_set_style_text_font(rolename_label, &lv_font_montserrat_14, 0);
+            lv_obj_align(rolename_label, LV_ALIGN_TOP_MID, g_sys_params.rolename_label_x, g_sys_params.rolename_label_y);
+
             ESP_LOGI(NFC_DATA_TAG, "Role name set to: %s", g_sys_params.role_name);
             break;
         }
 
         case 0x33:  // 角色类型
         {
-            // 将角色类型写入card_data
             strncpy(g_sys_params.role_type, (char*)&card_data[1], 15);
             save_system_params_to_nvs();
             char bg_img_path[35];
@@ -1534,7 +1610,6 @@ static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data
 
         case 0x34:  // 角色行动
         {
-            // 将角色行动写入card_data
             strncpy(g_sys_params.role_action, (char*)&card_data[1], 15);
             save_system_params_to_nvs();
             char bom_img_path[35];
@@ -2409,6 +2484,13 @@ vTaskDelay(pdMS_TO_TICKS(100));
     lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_14, 0);
     lv_obj_align(pos_label, LV_ALIGN_TOP_MID, g_sys_params.pos_label_x, g_sys_params.pos_label_y);
 
+    // 创建名称标签
+    rolename_label = lv_label_create(lv_scr_act());
+    lv_label_set_text(rolename_label, "----");
+    lv_obj_set_style_text_color(rolename_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(rolename_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(rolename_label, LV_ALIGN_TOP_MID, g_sys_params.rolename_label_x, g_sys_params.rolename_label_y);
+
 
     temperature_sensor_handle_t temp_handle = NULL;
     temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 50);
@@ -2419,15 +2501,15 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());    
-    // 启用温度传感器
-    ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
-    float tsens_out;
-    ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
-    // 温度传感器使用完毕后，禁用温度传感器，节约功耗
-    ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
+    // // 启用温度传感器
+    // ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
+     float tsens_out=88;
+    // ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
+    // // 温度传感器使用完毕后，禁用温度传感器，节约功耗
+    // ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
 
     // 读取电池电压并计算电量
-    uint32_t battery_voltage_mv = read_battery_voltage();
+    uint32_t battery_voltage_mv = 4000;//read_battery_voltage();
     int battery_capacity = battery_calculate_capacity(battery_voltage_mv);
 
     // 低电量检测和图片显示（电量<=20%时显示）
@@ -2464,6 +2546,12 @@ vTaskDelay(pdMS_TO_TICKS(100));
         lv_obj_clear_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if(g_sys_params.rolename_label_enable) {
+        lv_obj_clear_flag(rolename_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(rolename_label, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (g_sys_params.bg_image_mode == 0) {
@@ -2690,54 +2778,6 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
     vTaskDelete( NULL );
 }
 
-// 长按关机检测任务
-void shutdown_key_task(void *pvParameters)
-{
-    (void)pvParameters;
-    int hold_time = 0;
-
-
-    // 每100ms检测一次按键状态，最多检测30次（3秒）
-    while (hold_time < 30) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        // 读取按键状态（按下是高电平）
-        int button_level = gpio_get_level(GPIO_INTERRUPT_PIN);
-
-        if (button_level == 0) {
-            // 按键已释放（短按），触发正常按键功能
-            ESP_LOGI("SHUTDOWN", "Button released after %d00ms", hold_time);
-            if(g_task_running == 0){
-                g_task_running = 100;
-                vTaskDelay(pdMS_TO_TICKS(100));//等待稳定
-                xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
-            }
-            vTaskDelete(NULL);
-            return;
-        }
-
-        hold_time++;
-    }
-
-    // 长按超过3秒，执行关机
-    ESP_LOGI("SHUTDOWN", "Long press detected (>3s), shutting down...");
-
-    // 关闭背光和电源
-    BG_EN(0);      // 关闭背光
-    PW_EN(0);     // 关闭电源
-
-    // 等待按键释放
-    ESP_LOGI("SHUTDOWN", "Waiting for button release...");
-    while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
-    }
-
-    ESP_LOGI("SHUTDOWN", "Button long released, powering off...");
-
-    // 芯片会自然断电（因为 PW_EN 已经关闭）
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    
-}
-
 void key_task( void *pvParameters )
 {
     (void)pvParameters;
@@ -2745,6 +2785,47 @@ void key_task( void *pvParameters )
     unsigned char carduid[10];
     unsigned char cardpid[16];
 
+    // 长按关机检测：每100ms检测一次按键状态，最多检测30次（3秒）
+    int hold_time = 0;
+    while (hold_time < 30) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // 读取按键状态（按下是高电平）
+        int button_level = gpio_get_level(GPIO_INTERRUPT_PIN);
+
+        if (button_level == 0) {
+            // 按键已释放（短按），继续执行正常按键功能
+            ESP_LOGI("KEY", "Button released after %d00ms (short press)", hold_time);
+            break;  // 退出长按检测循环，继续执行正常按键功能
+        }
+
+        hold_time++;
+        ESP_LOGD("KEY", "Button still pressed, count=%d", hold_time);
+    }
+
+    // 如果长按超过3秒，执行关机
+    if (hold_time >= 30) {
+        ESP_LOGI("SHUTDOWN", "Long press detected (>3s), shutting down...");
+
+        // 关闭背光和电源
+        BG_EN(0);      // 关闭背光
+        PW_EN(0);     // 关闭电源
+
+        // 等待按键释放
+        ESP_LOGI("SHUTDOWN", "Waiting for button release...");
+        while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        ESP_LOGI("SHUTDOWN", "Button released, powering off...");
+
+        // 芯片会自然断电（因为 PW_EN 已经关闭）
+        g_task_running = 0;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // 短按，执行正常按键功能
     // 按键触发，开始测量指南针
     g_task_running=100;//超时
     xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
@@ -2776,7 +2857,7 @@ void key_task( void *pvParameters )
     ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
     // 释放SI523设备资源
     SI523_Deinit();
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(100));
     NPD_EN(0);
     
     // Compass_Heading True_Heading cardpid[16]
