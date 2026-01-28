@@ -54,6 +54,29 @@ esp_err_t SI523_IIC_Init(i2c_master_bus_handle_t master_handle, const SI523_conf
     vTaskDelay(pdMS_TO_TICKS(10));
 	ESP_LOGI(TAG, "Initializing SI523 handle");
 
+    /* check and cleanup old handle if exists */
+    if (g_si523_handle != NULL) {
+        ESP_LOGW(TAG, "SI523 already initialized, cleaning up old handle");
+        
+        /* remove old device from i2c bus */
+        if (g_si523_handle->i2c_handle != NULL) {
+            esp_err_t cleanup_ret = i2c_master_bus_rm_device(g_si523_handle->i2c_handle);
+            if (cleanup_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to remove old I2C device: %s", esp_err_to_name(cleanup_ret));
+            } else {
+                ESP_LOGD(TAG, "Removed old I2C device");
+            }
+        }
+        
+        /* free old handle memory */
+        free(g_si523_handle);
+        g_si523_handle = NULL;
+        ESP_LOGD(TAG, "Freed old handle memory");
+        
+        /* delay before reinitialization */
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
     /* validate device exists on the master bus */
     esp_err_t ret = i2c_master_probe(master_handle, SI523_config->i2c_address, I2C_XFR_TIMEOUT_MS);
     ESP_GOTO_ON_ERROR(ret, err, TAG, "device does not exist at address 0x%02x, SI523 device handle initialization failed", SI523_config->i2c_address);
@@ -1508,7 +1531,7 @@ void PCD_ACD_AutoCalc(void)
 				if(	temp	==	0) 	break;          //处在接近的VCON值附近值，如果偶合出现0值，均有概率误触发，应舍弃该值。
 			
 			temp_Compare=(temp_Compare+temp)/2;		
-			vTaskDelay(pdMS_TO_TICKS(1));//DelayUs(100);
+			vTaskDelay(pdMS_TO_TICKS(0.1));//DelayUs(100);
 		}		
 		
 		if(temp_Compare == 0 || temp_Compare == 0x7f) //比较当前值和所存值
@@ -1539,7 +1562,7 @@ void PCD_ACD_AutoCalc(void)
 			I_SI523_IO_Write(ACDConfigSelReg, (ACDConfigG << 2) | 0x40);		
 			temp = I_SI523_IO_Read(ACDConfigReg);
 			temp_Compare=(temp_Compare+temp)/2;		
-			vTaskDelay(pdMS_TO_TICKS(1));//DelayUs(100);
+			vTaskDelay(pdMS_TO_TICKS(0.1));//DelayUs(100);
 		}		
 		TR_Compare[j] = temp_Compare;
 	}//再调TR的档位，将采集值填入TR_Compare[]

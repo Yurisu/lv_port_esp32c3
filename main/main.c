@@ -20,6 +20,7 @@
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_sleep.h"
+#include "esp_pm.h"
 #include "sys/time.h"
 #include "nvs_flash.h"
 #include "driver/temperature_sensor.h"
@@ -109,7 +110,14 @@
 
 #define GPIO_INTERRUPT_PIN             GPIO_NUM_21
 
-
+// 电源管理配置
+#define CONFIG_EXAMPLE_MAX_CPU_FREQ_MHZ    160  // 最大 CPU 频率 (MHz)
+#define CONFIG_EXAMPLE_MIN_CPU_FREQ_MHZ    40   // 最小 CPU 频率 (MHz)
+  esp_pm_config_t pm_config = {
+   .max_freq_mhz = CONFIG_EXAMPLE_MAX_CPU_FREQ_MHZ,
+   .min_freq_mhz = CONFIG_EXAMPLE_MIN_CPU_FREQ_MHZ,
+   .light_sleep_enable = true
+};
 // 协议状态枚举
 typedef enum {
     PROTOCOL_STATE_IDLE = 0,        // 空闲状态
@@ -171,7 +179,7 @@ typedef struct {
 // 系统参数全局变量（默认值）
 static system_params_t g_sys_params = {
     .comp_offset = 0,              // 默认0度偏移
-    .run_interval = 1000,           // 默认1秒
+    .run_interval = 10000,           // 默认1秒
     .backlight_enable = 1,        // 默认开启
     .bg_image_mode = 1,           // 默认1张128*128
     .show_mac = 1,              // 默认显示
@@ -225,7 +233,7 @@ static void load_system_params_from_nvs(void);
 static void save_system_params_to_nvs(void);
 
 // 触发测量任务函数
-static esp_err_t start_measure_task(bool send_nfc_response);
+//static esp_err_t start_measure_task(bool send_nfc_response);
 static esp_err_t start_write_card_task(void);
 
 // 回传协议函数
@@ -233,7 +241,6 @@ static esp_err_t send_upload_response(uint8_t app_id, const uint8_t *payload, ui
 static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *payload, uint16_t payload_len);
 
 void i2c0_mmc56x3_task( void *pvParameters );
-void key_task( void *pvParameters );
 void writecard_task( void *pvParameters );
 
 // NFC数据处理函数
@@ -278,7 +285,7 @@ static esp_ble_adv_params_t hidd_adv_params = {
 
 // 测量函数参数
 // 按键中断队列句柄（全局）
-static QueueHandle_t gpio_evt_queue = NULL;
+//static QueueHandle_t gpio_evt_queue = NULL;
 // 原子操作保护的任务运行标志
 // static portATOMIC_TYPE g_task_running = 0;
 
@@ -459,6 +466,7 @@ void BG_EN(int state);
 #define HIGH_LEVEL 1
 
 static volatile uint8_t g_task_running = 1;  // 任务运行标志，防止重复创建
+static volatile uint8_t mmc_task_running = 0;  // 任务运行标志，防止重复创建
 
 static lv_obj_t *pos_label;
 static lv_obj_t *rolename_label;
@@ -559,56 +567,45 @@ void IIC_init(void) {
 
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    //BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     uint32_t gpio_num = (uint32_t)arg;
 
     // 检查任务是否已在运行
     // if (portATOMIC_GET(&g_task_running) == 0)
     // {
-
-    if (g_task_running == 0) {
-        // 设置运行标志（上锁）
-        g_task_running = 1;
-        // 发送按键事件（中断安全的API）
-        xQueueSendFromISR(gpio_evt_queue, &gpio_num, &xHigherPriorityTaskWoken);
-        // 上下文切换
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-    }
-    
-}
-
-static void key_task_handler(void* arg)
-{
-    uint32_t gpio_num;
-    for (;;)
-    {
-        // 等待按键事件
-        if (xQueueReceive(gpio_evt_queue, &gpio_num, portMAX_DELAY))
-        {
-            ESP_LOGI("KEY", "中断后半段:按键:%d事件", (int)gpio_num);
-            vTaskDelay(pdMS_TO_TICKS(20));
-            xTaskCreatePinnedToCore(key_task, "key_task", KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
-            // g_task_running = 0;
-            // 原子清除运行标志（任务处理完成）
-            // portATOMIC_SET(&g_task_running, 0);
+    if(gpio_num == GPIO_INTERRUPT_PIN){
+        if (g_task_running == 0) {
+            // 设置运行标志（上锁）
+            g_task_running = 1;
+            // 发送按键事件（中断安全的API）
+            //xQueueSendFromISR(gpio_evt_queue, &gpio_num, &xHigherPriorityTaskWoken);
+            // 上下文切换
+            //portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
         }
     }
-    vTaskDelete(NULL);
 }
+
+
 
 
 // NPD enable function
 void NPD_EN(int state)
 {
+    gpio_hold_dis(NPD_EN_GPIO);
     gpio_set_level(NPD_EN_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
+    gpio_hold_en(POWER_EN_GPIO);  // 保持电源使能引脚
 }
 void BG_EN(int state)
 {
+    gpio_hold_dis(LED_BG_GPIO);
     gpio_set_level(LED_BG_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
+    gpio_hold_en(LED_BG_GPIO);    // 保持背光使能引脚
 }
 void PW_EN(int state)
 {
+    gpio_hold_dis(POWER_EN_GPIO);
     gpio_set_level(POWER_EN_GPIO, state ? HIGH_LEVEL : LOW_LEVEL);
+    gpio_hold_en(POWER_EN_GPIO);  // 保持电源使能引脚
 }
 // Initialize NPD_EN GPIO10 as output with low level
 static void npd_gpio_init(void)
@@ -625,20 +622,26 @@ static void npd_gpio_init(void)
     gpio_set_direction(POWER_EN_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_level(POWER_EN_GPIO, HIGH_LEVEL);
     
-    
-}
-
-// Initialize GPIO interrupt
-void gpio_interrupt_init(void)
-{
-    // Configure GPIO pin
+        // Configure GPIO pin
     gpio_config_t io_conf = {};
-    io_conf.intr_type = GPIO_INTR_POSEDGE;      // Falling edge interrupt
+    io_conf.intr_type = GPIO_INTR_ANYEDGE;//GPIO_INTR_POSEDGE;      // Rising edge interrupt
     io_conf.pin_bit_mask = (1ULL << GPIO_INTERRUPT_PIN);
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;    // Enable pull-up resistor
     io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
     gpio_config(&io_conf);
+}
+
+// Initialize GPIO interrupt
+void gpio_interrupt_init(void)
+{
+
+
+    // Enable GPIO wakeup: specify GPIO number and wakeup level
+    //gpio_wakeup_enable(GPIO_INTERRUPT_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+
+    // Enable GPIO wakeup feature for light sleep
+    //esp_sleep_enable_gpio_wakeup();
 
     // Install GPIO ISR service
     gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
@@ -646,7 +649,7 @@ void gpio_interrupt_init(void)
     // Hook ISR handler for specific GPIO pin
     gpio_isr_handler_add(GPIO_INTERRUPT_PIN, gpio_isr_handler, (void*) GPIO_INTERRUPT_PIN);
 
-    ESP_LOGI(GPIO_INTERRUPT_TAG, "GPIO %d falling edge interrupt initialized", GPIO_INTERRUPT_PIN);
+    ESP_LOGI(GPIO_INTERRUPT_TAG, "GPIO %d rising edge interrupt initialized with wake-up support", GPIO_INTERRUPT_PIN);
 }
 
 // 重置协议状态
@@ -819,41 +822,7 @@ static void save_system_params_to_nvs(void) {
 }
 
 // 触发测量任务（等同于按键中断中的任务）
-static esp_err_t start_measure_task(bool send_nfc_response)
-{
-    ESP_LOGI("CMDp", "Starting measure task, send_nfc_response=%d", send_nfc_response);
-    // 检查任务是否正在运行，防止重复创建
-    if (g_task_running) {
-        ESP_LOGW("CMDp", "Measure task already running");
-        const char *warning_msg = "Error: Task already running";
-        send_upload_response(APP_ID_SYSTEM, (uint8_t*)warning_msg, strlen(warning_msg));
-        return ESP_ERR_INVALID_STATE;
-    }
 
-    // 设置NFC响应标志（如果需要）
-    if (send_nfc_response) {
-        g_nfc_pending_response = true;
-        ESP_LOGI("CMDp", "NFC response flag set, will send data after key_task completes");
-    }
-
-    // 创建一次性任务来处理按键事件（等同于按键中断）
-    g_task_running = 100;
-    BaseType_t ret = xTaskCreatePinnedToCore(key_task, KEY_TASK_NAME, KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
-
-    if (ret == pdPASS) {
-        const char *success_msg = "Key task started";
-        send_upload_response(APP_ID_SYSTEM, (uint8_t*)success_msg, strlen(success_msg));
-        ESP_LOGI("CMDp", "Key task created successfully");
-        return ESP_OK;
-    } else {
-        g_task_running = 0;  // 创建失败，重置标志
-        g_nfc_pending_response = false;  // 清除NFC响应标志
-        const char *error_msg = "Error: Failed to create task";
-        send_upload_response(APP_ID_SYSTEM, (uint8_t*)error_msg, strlen(error_msg));
-        ESP_LOGE("CMDp", "Failed to create key task");
-        return ESP_FAIL;
-    }
-}
 
 // 处理初始化帧（0xD1命令）
 // 帧结构：命令(1) | checksum(2) | 文件大小(4) | 长度(1) | 文件名(N)
@@ -1338,6 +1307,8 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         if (strlen(value) > 0 && strlen(value) < 20) {
             strncpy(g_sys_params.role_name, value, 19);
             g_sys_params.role_name[19] = '\0';
+            
+            lv_label_set_text(rolename_label, g_sys_params.role_name);
             param_changed = true;
         } else {
             ESP_LOGE("CMDp", "Invalid role_name value: %s (length=%d)", value, (int)strlen(value));
@@ -1464,10 +1435,10 @@ static esp_err_t handle_get_param_frame(const uint8_t *data, uint16_t length) {
     else if (strcmp(key_str, "Comp") == 0) {
         // Comp 是只读参数，返回当前指南针方向
         if(g_task_running == 0) {
-            g_task_running=100;//超时
+            mmc_task_running=100;//超时
+            g_compending_response = true;
             xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
             // 非阻塞方式：设置标记位，任务完成时自动发送响应
-            g_compending_response = true;
             snprintf(response, sizeof(response), "Comp measuring...");
             ESP_LOGI("CMDp", "Compass measurement started, response will be sent after task completes");
         }
@@ -2168,7 +2139,8 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                 else                 if (length == CMD_NFC_LEN &&
                     data[1] == 0x4E && data[2] == 0x46 && data[3] == 0x43) {
                     ESP_LOGI("CMDp", "NFC trigger command received");
-                    start_measure_task(true);  // NFC触发命令需要发送NFC响应
+                    g_nfc_pending_response = true;
+                    //start_measure_task(true);  // NFC触发命令需要发送NFC响应
                 }
                 else {
                     ESP_LOGW("CMDp", "Unknown system command, length=%d", length);
@@ -2249,46 +2221,52 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
 
 _Noreturn void app_main(void) {
 
-  IIC_init();
-  npd_gpio_init();
-  gpio_interrupt_init();
-  adc_init();  // 初始化ADC，用于读取电池电压
-  BG_EN(0);
-
+    IIC_init();
+    npd_gpio_init();
+    gpio_interrupt_init();
+    adc_init();  // 初始化ADC，用于读取电池电压
+    BG_EN(1);
+    
 
   // 自动创建任务，按键触发
   //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
-    // 中断后半段触发队列
-    gpio_evt_queue = xQueueCreate(1, sizeof(uint32_t));
-    // 创建失败断言
-    configASSERT(gpio_evt_queue != NULL);
+    // // 中断后半段触发队列
+    // gpio_evt_queue = xQueueCreate(1, sizeof(uint32_t));
+    // // 创建失败断言
+    // configASSERT(gpio_evt_queue != NULL);
 
-    // 按键中断后半段处理任务
-    xTaskCreatePinnedToCore(
-        key_task_handler,
-        KEY_ISR_TASK_NAME,
-        KEY_ISR_TASK_STACK_SIZE,
-        NULL,               // 参数
-        KEY_ISR_TASK_PRIORITY,
-        NULL,               // 句柄
-        0                   
-    );
+    // // 按键中断后半段处理任务
+    // xTaskCreatePinnedToCore(
+    //     key_task_handler,
+    //     KEY_ISR_TASK_NAME,
+    //     KEY_ISR_TASK_STACK_SIZE,
+    //     NULL,               // 参数
+    //     KEY_ISR_TASK_PRIORITY,
+    //     NULL,               // 句柄
+    //     0                   
+    // );
 
-  xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
-  fflush(stdout);
-  {
-    TaskHandle_t print_chip_info_handle = xTaskGetHandle("PrintChipInfo");
-    if (print_chip_info_handle != NULL) {
-      vTaskDelete(print_chip_info_handle);
-      ESP_LOGI("app_main", "Task PrintChipInfo delete.");
-    }
-  }
-  // while (1) {
-     vTaskDelay(pdMS_TO_TICKS(100));
-  // }
+//   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
+//   fflush(stdout);
+//   {
+//     TaskHandle_t print_chip_info_handle = xTaskGetHandle("PrintChipInfo");
+//     if (print_chip_info_handle != NULL) {
+//       vTaskDelete(print_chip_info_handle);
+//       ESP_LOGI("app_main", "Task PrintChipInfo delete.");
+//     }
+//   }
+
 
     esp_err_t ret;
+    while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
+            ret++;
+        }
+
+  // while (1) {
+     vTaskDelay(pdMS_TO_TICKS(10));
+  // }
+
 
 // Initialize NVS.
         ret = nvs_flash_init();
@@ -2554,7 +2532,8 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
     // 创建名称标签
     rolename_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(rolename_label, "----");
+    //lv_label_set_text(rolename_label, "----");            
+    lv_label_set_text(rolename_label, g_sys_params.role_name);
     lv_obj_set_style_text_color(rolename_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(rolename_label, &lv_font_montserrat_14, 0);
     lv_obj_align(rolename_label, LV_ALIGN_TOP_MID, g_sys_params.rolename_label_x, g_sys_params.rolename_label_y);
@@ -2564,17 +2543,132 @@ vTaskDelay(pdMS_TO_TICKS(100));
     temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 50);
     ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_handle));
 
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
 
-    g_task_running = 0;
+    g_task_running = 1;
 
   while (1) {
-    ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());    
-    // 启用温度传感器
-    ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
-     float tsens_out=88;
-    ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
-    // 温度传感器使用完毕后，禁用温度传感器，节约功耗
-    ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
+    ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());   
+    
+    // 背光控制
+    BG_EN(g_sys_params.backlight_enable);
+    if(g_task_running || gpio_get_level(GPIO_INTERRUPT_PIN)) {
+        g_task_running=1;
+        // 长按关机检测：每100ms检测一次按键状态-------------------------------------------------
+        int hold_time=0;
+        while (hold_time < 300) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            // 读取按键状态（按下是高电平）
+            if (gpio_get_level(GPIO_INTERRUPT_PIN) == 0) {
+                // 按键已释放（短按），继续执行正常按键功能
+                ESP_LOGI("KEY", "Button released after %d00ms (short press)", hold_time);
+                break;  // 退出长按检测循环，继续执行正常按键功能
+            }else{
+                // 按键持续按下中
+                hold_time++;
+                //ESP_LOGD("KEY", "Button still pressed, count=%d", hold_time);
+                // 如果长按超过3秒，执行关机
+                if (hold_time >= 300) {
+                    ESP_LOGI("SHUTDOWN", "Long press detected (>3s), shutting down...");
+                    // 关闭背光和电源
+                    BG_EN(0);      // 关闭背光
+                    // 等待按键释放
+                    ESP_LOGI("SHUTDOWN", "Waiting for button release...");
+                    while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
+                        hold_time++;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(100)); 
+                    PW_EN(0);     // 关闭电源
+                    ESP_LOGI("SHUTDOWN", "Button released, powering off...");
+                    vTaskDelay(pdMS_TO_TICKS(5000)); 
+                    // 芯片会自然断电（因为 PW_EN 已经关闭）
+                    g_task_running = 0;
+                    break;
+                }  
+            }
+        }
+    }
+    
+    mmc_task_running=100;//测量完毕=3
+    xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+    while(mmc_task_running){
+            vTaskDelay(pdMS_TO_TICKS(10));
+            mmc_task_running--;
+        }
+
+    while(g_task_running || g_nfc_pending_response ) {
+        // 按键事件----------------------------------------------------------------
+        ESP_LOGI(MMC_TAG, "powering on devices...");
+        int status = 5;
+        unsigned char carduid[10];
+        unsigned char cardpid[16];
+        NPD_EN(1);// 上电并等待模块稳定
+        vTaskDelay(pdMS_TO_TICKS(10));
+        SI523_Init(i2c0_bus_hdl);// 初始化SI523
+        vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms让SI523初始化完成
+        for(int i = 0; i < status; i++) {    
+            if(SI523_CheckVer() != 0){
+            PCD_SI523_TypeA_Init();
+            //PCD_SI523_TypeA();
+            if(PCD_SI523_TypeA_GetUID(carduid)==0){
+                if(SI523_read_NTAG(12, cardpid) == MI_OK){
+                ESP_LOGI(MMC_TAG, "NTAG0: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
+                ESP_LOGI(MMC_TAG, "NTAG4: %02X %02X %02X %02X", cardpid[4], cardpid[5], cardpid[6], cardpid[7]);
+                ESP_LOGI(MMC_TAG, "NTAG8: %02X %02X %02X %02X", cardpid[8], cardpid[9], cardpid[10], cardpid[11]);
+                ESP_LOGI(MMC_TAG, "NTAGC: %02X %02X %02X %02X", cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
+                break;
+                }            
+            }}
+            PcdReset();
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        // 测量完成，下电节省电量
+        ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
+        // 释放SI523设备资源
+        SI523_Deinit();
+        vTaskDelay(pdMS_TO_TICKS(1));
+        NPD_EN(0);
+
+        // 检查是否有待发送的NFC响应
+        if(g_nfc_pending_response) {
+            g_nfc_pending_response = false;  // 清除标记位
+            // 返回读取到的数据到上位机
+            char response[64];
+            snprintf(response, sizeof(response), "Read: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                        cardpid[0], cardpid[1], cardpid[2], cardpid[3],
+                        cardpid[4], cardpid[5], cardpid[6], cardpid[7],
+                        cardpid[8], cardpid[9], cardpid[10], cardpid[11],
+                        cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
+            send_upload_response(APP_ID_WRITE_CARD, (uint8_t*)response, strlen(response));
+            ESP_LOGI("NFC", "NFC response sent: %s", response);
+            break;
+        }
+        // 开始测量指南针
+        mmc_task_running=100;//测量完毕=3
+        xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
+        
+        // 处理NFC卡片数据
+        process_nfc_data(carduid, cardpid);
+        // 等待测量指南针完成
+        while(mmc_task_running){
+            vTaskDelay(pdMS_TO_TICKS(10));
+            mmc_task_running--;
+        }
+
+        g_task_running = 0;
+
+    }
+
+    // 文件传输超时检查
+    if (g_img_protocol.state == PROTOCOL_STATE_RECEIVING_DATA && g_img_protocol.last_packet_time > 0) {
+        int64_t current_time = esp_timer_get_time() / 1000;  // 当前时间（毫秒）
+        int64_t elapsed_time = current_time - g_img_protocol.last_packet_time;
+
+        if (elapsed_time > TRANSFER_TIMEOUT_MS) {
+            ESP_LOGE("CMDp", "File transfer timeout: %lld ms elapsed, resetting...", elapsed_time);
+            reset_protocol_state();
+        }
+    }
 
     // 读取电池电压并计算电量
     uint32_t battery_voltage_mv = read_battery_voltage();
@@ -2596,19 +2690,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
         lv_obj_add_flag(lowpwpic_img, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // 文件传输超时检查
-    if (g_img_protocol.state == PROTOCOL_STATE_RECEIVING_DATA && g_img_protocol.last_packet_time > 0) {
-        int64_t current_time = esp_timer_get_time() / 1000;  // 当前时间（毫秒）
-        int64_t elapsed_time = current_time - g_img_protocol.last_packet_time;
-
-        if (elapsed_time > TRANSFER_TIMEOUT_MS) {
-            ESP_LOGE("CMDp", "File transfer timeout: %lld ms elapsed, resetting...", elapsed_time);
-            reset_protocol_state();
-        }
-    }
-
-    // 背光控制
-    BG_EN(g_sys_params.backlight_enable);
 
     if(g_sys_params.pos_label_enable) {
         lv_obj_clear_flag(pos_label, LV_OBJ_FLAG_HIDDEN);
@@ -2630,6 +2711,9 @@ vTaskDelay(pdMS_TO_TICKS(100));
         lv_obj_add_flag(bom_img, LV_OBJ_FLAG_HIDDEN);
     }
 
+
+
+
     // 更新开机时间显示（使用RTC时间，深度睡眠时仍然运行）
     struct timeval tv_now;
     gettimeofday(&tv_now, NULL);
@@ -2639,6 +2723,13 @@ vTaskDelay(pdMS_TO_TICKS(100));
     // 根据heartbeat参数决定是否发送心跳包
     if (g_sys_params.heartbeat_enable) {
     if( g_sys_params.heartbeat_enable == 2)  g_sys_params.heartbeat_enable = 0;
+        // 启用温度传感器
+        ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
+        float tsens_out=333.3;
+        ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
+        // 温度传感器使用完毕后，禁用温度传感器，节约功耗
+        ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
+
         snprintf((char*)nus_data, sizeof(nus_data), "%02X:%02X:%02X:%02X:%02X:%02X %lu %lu %d%% %dC",
             macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5],
             uptime_seconds, battery_voltage_mv, battery_capacity, (int)tsens_out);
@@ -2663,39 +2754,50 @@ vTaskDelay(pdMS_TO_TICKS(100));
     // 检查1: 文件传输正在进行时不睡眠
     if (g_img_protocol.state == PROTOCOL_STATE_RECEIVING_DATA) {
         can_sleep = false;
-        ESP_LOGD("SLEEP", "Cannot sleep: file transfer in progress");
+        //ESP_LOGD("SLEEP", "Cannot sleep: file transfer in progress");
     }
     
     // 检查2: 有蓝牙连接时不睡眠（避免中断通信）
     if (sec_conn) {
         can_sleep = false;
-        ESP_LOGD("SLEEP", "Cannot sleep: Bluetooth connected");
+        //ESP_LOGD("SLEEP", "Cannot sleep: Bluetooth connected");
     }
     
-    // 检查3: run_interval 太短时不睡眠（LVGL需要定期更新）
-    if (g_sys_params.run_interval < 500) {
-        can_sleep = false;
-        ESP_LOGD("SLEEP", "Cannot sleep: run_interval too short (%d ms)", g_sys_params.run_interval);
-    }
+
     
     if (0) { //can_sleep
-        // 配置 light sleep
+        // 配置 light sleep 唤醒源
+        // 1. Timer 唤醒（周期性唤醒）
         esp_sleep_enable_timer_wakeup(g_sys_params.run_interval * 5000);  // 单位：微秒
-        
-        // 保持关键引脚电平，防止设备断电
-        gpio_hold_en(LED_BG_GPIO);    // 保持背光使能引脚
-        gpio_hold_en(POWER_EN_GPIO);  // 保持电源使能引脚
-        
+        // 2. GPIO 唤醒（按键中断立即唤醒）
+        // esp_sleep_enable_gpio_wakeup 已在 gpio_interrupt_init() 中配置
+        esp_sleep_enable_gpio_wakeup();
+
+
         // 进入 light sleep
-        ESP_LOGI("SLEEP", "Entering light sleep for %d ms", g_sys_params.run_interval);
+        // ESP_LOGI("SLEEP", "Entering light sleep for %d ms (timer + GPIO %d wake-up)", 
+        //          g_sys_params.run_interval, GPIO_INTERRUPT_PIN);
         esp_light_sleep_start();
-        
+
+        // 检查唤醒原因
+        // esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+        // if (wakeup_cause == ESP_SLEEP_WAKEUP_GPIO) {
+        //     ESP_LOGI("SLEEP", "Woke up by GPIO %d (button press)", GPIO_INTERRUPT_PIN);
+        // } else if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
+        //     ESP_LOGD("SLEEP", "Woke up by timer");
+        // }
+
         // 唤醒后解除引脚保持
         //gpio_hold_dis(LED_BG_GPIO);
         //gpio_hold_dis(POWER_EN_GPIO);
     } else {
         // 不能睡眠时使用普通的 vTaskDelay
-        vTaskDelay(pdMS_TO_TICKS(g_sys_params.run_interval));
+        uint32_t intervaltime = g_sys_params.run_interval/20;
+        while(intervaltime){
+            vTaskDelay(pdMS_TO_TICKS(20));
+            if(g_task_running || gpio_get_level(GPIO_INTERRUPT_PIN)) break;
+            else intervaltime--;
+        }
     }
 
   }
@@ -2705,6 +2807,27 @@ vTaskDelay(pdMS_TO_TICKS(100));
   // buf2 is NULL, no need to free
   vTaskDelete(NULL);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2818,7 +2941,10 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
                     //ESP_LOGI(MMC_TAG, "Compass Z-Axis:  %f mG", magnetic_axes.z_axis);
                     Compass_Heading = (int)(mmc56x3_convert_to_heading(magnetic_axes));
                     ESP_LOGI(MMC_TAG, "Compass Heading: %d °", Compass_Heading);
-                    True_Heading = (int)(mmc56x3_convert_to_true_heading((float)g_sys_params.comp_offset, magnetic_axes));
+                    // True_Heading = (int)(mmc56x3_convert_to_true_heading((float)g_sys_params.comp_offset, magnetic_axes));
+                    True_Heading = Compass_Heading - g_sys_params.comp_offset;
+                    if(True_Heading < 0) True_Heading = (int)(mmc56x3_convert_to_heading(magnetic_axes) + 360.0f);
+                    if(True_Heading >= 360) True_Heading =  (int)(mmc56x3_convert_to_heading(magnetic_axes) - 360.0f);
                     ESP_LOGI(MMC_TAG, "True Heading:    %d °", True_Heading);
                     // 成功读取一次数据后退出循环
                     break;
@@ -2826,7 +2952,7 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
         //ESP_LOGI(MMC_TAG, "######################## MMC56X3 - END ###########################");
         vTaskDelay(pdMS_TO_TICKS(200));
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        //vTaskDelay(pdMS_TO_TICKS(10));
     
 
     // 释放MMC56X3资源
@@ -2842,122 +2968,9 @@ void i2c0_mmc56x3_task( void *pvParameters ) {
         ESP_LOGI(MMC_TAG, "Compass response sent: %s", response);
     }
 
-    g_task_running=3;
+    mmc_task_running=3;
     vTaskDelete( NULL );
 }
-
-void key_task( void *pvParameters )
-{
-    (void)pvParameters;
-    int status = 5;
-    unsigned char carduid[10];
-    unsigned char cardpid[16];
-
-    // 长按关机检测：每100ms检测一次按键状态，最多检测30次（3秒）
-    int hold_time = 0;
-    while (hold_time < 30) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        // 读取按键状态（按下是高电平）
-        int button_level = gpio_get_level(GPIO_INTERRUPT_PIN);
-
-        if (button_level == 0) {
-            // 按键已释放（短按），继续执行正常按键功能
-            ESP_LOGI("KEY", "Button released after %d00ms (short press)", hold_time);
-            break;  // 退出长按检测循环，继续执行正常按键功能
-        }
-
-        hold_time++;
-        ESP_LOGD("KEY", "Button still pressed, count=%d", hold_time);
-    }
-
-    // 如果长按超过3秒，执行关机
-    if (hold_time >= 30) {
-        ESP_LOGI("SHUTDOWN", "Long press detected (>3s), shutting down...");
-
-        // 关闭背光和电源
-        BG_EN(0);      // 关闭背光
-        PW_EN(0);     // 关闭电源
-
-        // 等待按键释放
-        ESP_LOGI("SHUTDOWN", "Waiting for button release...");
-        while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-
-        ESP_LOGI("SHUTDOWN", "Button released, powering off...");
-
-        // 芯片会自然断电（因为 PW_EN 已经关闭）
-        g_task_running = 0;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // 短按，执行正常按键功能
-    // 按键触发，开始测量指南针
-    g_task_running=100;//超时
-    xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
-    while(g_task_running>10){
-        vTaskDelay(pdMS_TO_TICKS(100));
-        g_task_running--;
-    }
-    ESP_LOGI(MMC_TAG, "Button pressed, powering on devices...");
-    NPD_EN(1);// 上电并等待模块稳定
-    vTaskDelay(pdMS_TO_TICKS(100));
-    SI523_Init(i2c0_bus_hdl);// 初始化SI523
-    vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms让SI523初始化完成
-    for(int i = 0; i < status; i++) {    
-        if(SI523_CheckVer() != 0){
-        PCD_SI523_TypeA_Init();
-        //PCD_SI523_TypeA();
-        if(PCD_SI523_TypeA_GetUID(carduid)==0){
-            if(SI523_read_NTAG(12, cardpid) == MI_OK){
-            ESP_LOGI(MMC_TAG, "NTAG0: %02X %02X %02X %02X", cardpid[0], cardpid[1], cardpid[2], cardpid[3]);
-            ESP_LOGI(MMC_TAG, "NTAG4: %02X %02X %02X %02X", cardpid[4], cardpid[5], cardpid[6], cardpid[7]);
-            ESP_LOGI(MMC_TAG, "NTAG8: %02X %02X %02X %02X", cardpid[8], cardpid[9], cardpid[10], cardpid[11]);
-            ESP_LOGI(MMC_TAG, "NTAGC: %02X %02X %02X %02X", cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
-            break;
-            }            
-        }}
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    // 测量完成，下电节省电量
-    ESP_LOGI(MMC_TAG, "Measurement completed, powering off devices...");
-    // 释放SI523设备资源
-    SI523_Deinit();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    NPD_EN(0);
-    
-    // Compass_Heading True_Heading cardpid[16]
-    // 处理NFC卡片数据
-    process_nfc_data(carduid, cardpid);
-
-    // 检查是否有待发送的NFC响应
-    if(g_nfc_pending_response) {
-        g_nfc_pending_response = false;  // 清除标记位
-
-
-
-        // 返回读取到的数据到上位机
-        char response[64];
-        snprintf(response, sizeof(response), "Read: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
-                    cardpid[0], cardpid[1], cardpid[2], cardpid[3],
-                    cardpid[4], cardpid[5], cardpid[6], cardpid[7],
-                    cardpid[8], cardpid[9], cardpid[10], cardpid[11],
-                    cardpid[12], cardpid[13], cardpid[14], cardpid[15]);
-        send_upload_response(APP_ID_WRITE_CARD, (uint8_t*)response, strlen(response));
-        ESP_LOGI("NFC", "NFC response sent: %s", response);
-    }
-
-
-
-
-    // 清除任务运行标志，允许创建新任务
-    g_task_running = 0;
-
-    vTaskDelete( NULL );
-}
-
 
 
 
