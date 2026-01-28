@@ -63,6 +63,7 @@
 #define CMD_DIR_LEN             4     // 列出目录命令长度
 #define CMD_RESET_LEN           6     // 重启命令长度
 #define CMD_NFC_LEN             4     // NFC触发命令长度
+#define CMD_PM_CONFIG_LEN       5     // 不使用失眠模式
 // 系统参数命令定义
 #define CMD_SET_PARAM          0xA1  // 设置系统参数
 #define CMD_GET_PARAM          0xA2  // 获取系统参数
@@ -2141,6 +2142,15 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
                     ESP_LOGI("CMDp", "NFC trigger command received");
                     g_nfc_pending_response = true;
                     //start_measure_task(true);  // NFC触发命令需要发送NFC响应
+                }
+                //pm_config: 0xEE 0x70 0x6D 0x5F 0x63 ("pm_c")
+                else if (length == CMD_PM_CONFIG_LEN &&
+                         data[1] == 0x70 && data[2] == 0x6D && data[3] == 0x5F && data[4] == 0x63) {
+                    ESP_LOGI("CMDp", "PM config command received");
+                    pm_config.light_sleep_enable = false;
+                    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+
+                    
                 }
                 else {
                     ESP_LOGW("CMDp", "Unknown system command, length=%d", length);

@@ -295,6 +295,9 @@ class BLEConnectionManager:
             elif command_type == "reset":
                 # 重启命令：0xEE 0x72 0x65 0x73 0x65 0x74
                 data = bytearray([0xEE, 0x72, 0x65, 0x73, 0x65, 0x74])
+            elif command_type == "pm_c":
+                # 禁止节能命令：0xEE 0x70 0x6D 0x5F 0x63 ("pm_c")
+                data = bytearray([0xEE, 0x70, 0x6D, 0x5F, 0x63])
             else:
                 self.log(f"✗ 未知命令类型: {command_type}")
                 return False
@@ -561,6 +564,7 @@ class BLEGUI:
         sys_btn_frame.pack(fill=tk.X, pady=5)
         ttk.Button(sys_btn_frame, text="格式化文件系统", command=self.send_format).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="列出目录", command=self.send_dir).pack(side=tk.LEFT, padx=5)
+        ttk.Button(sys_btn_frame, text="禁止节能", command=self.send_pm_c).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="重启MCU", command=self.send_reset).pack(side=tk.LEFT, padx=5)
 
         # 系统参数面板
@@ -776,6 +780,18 @@ class BLEGUI:
             async def do_dir():
                 await self.manager.send_system_command("dir")
             self.run_async(do_dir())
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def send_pm_c(self):
+        """发送禁止节能命令"""
+        if not self.check_connected():
+            return
+
+        def task():
+            async def do_pm_c():
+                await self.manager.send_system_command("pm_c")
+            self.run_async(do_pm_c())
 
         threading.Thread(target=task, daemon=True).start()
 
