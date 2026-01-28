@@ -2757,25 +2757,10 @@ vTaskDelay(pdMS_TO_TICKS(100));
     lv_tick_inc(100);
     lv_task_handler();
     
-    // 检查是否可以进入 light sleep
-    bool can_sleep = true;
-    
-    // 检查1: 文件传输正在进行时不睡眠
-    if (g_img_protocol.state == PROTOCOL_STATE_RECEIVING_DATA) {
-        can_sleep = false;
-        //ESP_LOGD("SLEEP", "Cannot sleep: file transfer in progress");
-    }
-    
-    // 检查2: 有蓝牙连接时不睡眠（避免中断通信）
-    if (sec_conn) {
-        can_sleep = false;
-        //ESP_LOGD("SLEEP", "Cannot sleep: Bluetooth connected");
-    }
-    
 
     
 
-    // 蓝牙更新界面的时候要马上退出
+    // TODO,蓝牙更新界面的时候要马上退出
     uint32_t intervaltime = g_sys_params.run_interval/20;
     while(intervaltime){
         vTaskDelay(pdMS_TO_TICKS(20));
