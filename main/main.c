@@ -276,6 +276,14 @@ static esp_ble_adv_params_t hidd_adv_params = {
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
 };
 
+// 测量函数参数
+// 按键中断队列句柄（全局）
+static QueueHandle_t gpio_evt_queue = NULL;
+// 原子操作保护的任务运行标志
+// static portATOMIC_TYPE g_task_running = 0;
+
+
+
 //nfc
 #include "mmc56x3.h"
 #include "SI523_App.h"
@@ -439,6 +447,11 @@ const char* hidden_msg2 = "Professional hardware and software solutions availabl
 #define KEY_TASK_PRIORITY             (tskIDLE_PRIORITY + 3)
 #define KEY_TAG                       "KEY"
 
+#define KEY_ISR_TASK_NAME                 "key_isr_task"
+#define KEY_ISR_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 4)
+#define KEY_ISR_TASK_PRIORITY             (tskIDLE_PRIORITY + 4)
+#define KEY_ISR_TAG                       "KEY_ISR"
+
 void NPD_EN(int state);
 void BG_EN(int state);
 
@@ -525,23 +538,62 @@ void IIC_init(void) {
 
 
 // GPIO interrupt handler
+// static void IRAM_ATTR gpio_isr_handler(void* arg)
+// {
+//     //BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+//     uint32_t gpio_num = (uint32_t) arg;
+//     // 清除中断状态
+//     // 检查任务是否正在运行，防止重复创建
+//     if (g_task_running == 0) {
+//         // 立即设置标志位，防止任务创建和启动之间的时间窗口内再次触发中断
+//         g_task_running = 1;  // 标记为正在运行（任务启动后会设置为100）
+//         // 启动按键任务，会根据按键持续时间决定是关机还是正常按键
+//         xTaskCreatePinnedToCore(key_task, "key_task", KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
+//     }
+//     gpio_intr_disable(gpio_num);
+
+//     gpio_intr_enable(gpio_num);
+//     portYIELD_FROM_ISR();
+
+// }
+
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
-    //BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    uint32_t gpio_num = (uint32_t) arg;
-    // 清除中断状态
-    // 检查任务是否正在运行，防止重复创建
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    uint32_t gpio_num = (uint32_t)arg;
+
+    // 检查任务是否已在运行
+    // if (portATOMIC_GET(&g_task_running) == 0)
+    // {
+
     if (g_task_running == 0) {
-        // 立即设置标志位，防止任务创建和启动之间的时间窗口内再次触发中断
-        g_task_running = 1;  // 标记为正在运行（任务启动后会设置为100）
-        // 启动按键任务，会根据按键持续时间决定是关机还是正常按键
-        xTaskCreatePinnedToCore(key_task, "key_task", KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
+        // 设置运行标志（上锁）
+        g_task_running = 1;
+        // 发送按键事件（中断安全的API）
+        xQueueSendFromISR(gpio_evt_queue, &gpio_num, &xHigherPriorityTaskWoken);
+        // 上下文切换
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
-    gpio_intr_disable(gpio_num);
+    
+}
 
-    gpio_intr_enable(gpio_num);
-    portYIELD_FROM_ISR();
-
+static void key_task_handler(void* arg)
+{
+    uint32_t gpio_num;
+    for (;;)
+    {
+        // 等待按键事件
+        if (xQueueReceive(gpio_evt_queue, &gpio_num, portMAX_DELAY))
+        {
+            ESP_LOGI("KEY", "中断后半段:按键:%d事件", (int)gpio_num);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            xTaskCreatePinnedToCore(key_task, "key_task", KEY_TASK_STACK_SIZE, NULL, KEY_TASK_PRIORITY, NULL, 0);
+            // g_task_running = 0;
+            // 原子清除运行标志（任务处理完成）
+            // portATOMIC_SET(&g_task_running, 0);
+        }
+    }
+    vTaskDelete(NULL);
 }
 
 
@@ -2207,6 +2259,22 @@ _Noreturn void app_main(void) {
   // 自动创建任务，按键触发
   //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
 
+    // 中断后半段触发队列
+    gpio_evt_queue = xQueueCreate(1, sizeof(uint32_t));
+    // 创建失败断言
+    configASSERT(gpio_evt_queue != NULL);
+
+    // 按键中断后半段处理任务
+    xTaskCreatePinnedToCore(
+        key_task_handler,
+        KEY_ISR_TASK_NAME,
+        KEY_ISR_TASK_STACK_SIZE,
+        NULL,               // 参数
+        KEY_ISR_TASK_PRIORITY,
+        NULL,               // 句柄
+        0                   
+    );
+
   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
   fflush(stdout);
   {
@@ -2501,15 +2569,15 @@ vTaskDelay(pdMS_TO_TICKS(100));
 
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());    
-    // // 启用温度传感器
-    // ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
+    // 启用温度传感器
+    ESP_ERROR_CHECK(temperature_sensor_enable(temp_handle));
      float tsens_out=88;
-    // ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
-    // // 温度传感器使用完毕后，禁用温度传感器，节约功耗
-    // ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
+    ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_handle, &tsens_out));
+    // 温度传感器使用完毕后，禁用温度传感器，节约功耗
+    ESP_ERROR_CHECK(temperature_sensor_disable(temp_handle));
 
     // 读取电池电压并计算电量
-    uint32_t battery_voltage_mv = 4000;//read_battery_voltage();
+    uint32_t battery_voltage_mv = read_battery_voltage();
     int battery_capacity = battery_calculate_capacity(battery_voltage_mv);
 
     // 低电量检测和图片显示（电量<=20%时显示）
