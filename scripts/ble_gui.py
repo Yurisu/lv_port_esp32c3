@@ -233,6 +233,18 @@ class BLEConnectionManager:
         try:
             text = data.decode('utf-8', errors='ignore')
             self.log(f"  数据内容(text): {text}")
+            
+            param_value = ''
+            
+            # 解析参数响应格式：param_name=value
+            if '=' in text:
+                parts = text.split('=', 1)
+                if len(parts) == 2:
+                    param_name = parts[0].strip()
+                    param_value = parts[1].strip()
+                    # self.log(f"  解析到参数: {param_name} = {param_value}")
+                    # 通过日志消息传递参数值给GUI层处理
+                    self.log(f"PARSE_PARAM:{param_name}:{param_value}")
         except:
             pass
 
@@ -298,6 +310,9 @@ class BLEConnectionManager:
             elif command_type == "pm_c":
                 # 禁止节能命令：0xEE 0x70 0x6D 0x5F 0x63 ("pm_c")
                 data = bytearray([0xEE, 0x70, 0x6D, 0x5F, 0x63])
+            elif command_type == "status":
+                # 获取4个状态命令：0xEE 0x73 0x74 0x61 0x74 0x75 0x73 ("status")
+                data = bytearray([0xEE, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73])
             else:
                 self.log(f"✗ 未知命令类型: {command_type}")
                 return False
@@ -515,6 +530,24 @@ class BLEConnectionManager:
         else:
             self.log("当前未连接到设备")
 
+    async def send_nfc_read_command(self):
+        """发送NFC读取命令"""
+        self.log(f"\n{'='*60}")
+        self.log("发送NFC读取命令")
+        self.log(f"{'='*60}")
+
+        try:
+            # NFC读取命令：0xEE 0x4E 0x46 0x43 (ASCII "NFC")
+            frame = bytes([0xEE, 0x4E, 0x46, 0x43])
+            self.log(f"命令数据(hex): {frame.hex()}")
+
+            success = await self.send_data(frame)
+            return success
+
+        except Exception as e:
+            self.log(f"✗ 发送NFC读取命令失败: {e}")
+            return False
+
 
 class BLEGUI:
     """BLE连接工具图形界面"""
@@ -566,6 +599,9 @@ class BLEGUI:
         ttk.Button(sys_btn_frame, text="列出目录", command=self.send_dir).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="禁止节能", command=self.send_pm_c).pack(side=tk.LEFT, padx=5)
         ttk.Button(sys_btn_frame, text="重启MCU", command=self.send_reset).pack(side=tk.LEFT, padx=5)
+        ttk.Button(sys_btn_frame, text="读取NFC", command=self.send_nfc_read).pack(side=tk.LEFT, padx=5)
+        ttk.Button(sys_btn_frame, text="获取4个状态", command=self.send_status).pack(side=tk.LEFT, padx=5)
+        ttk.Button(sys_btn_frame, text="获取心跳包", command=self.send_heartbeat).pack(side=tk.LEFT, padx=5)
 
         # 系统参数面板
         param_frame = ttk.LabelFrame(self.root, text="系统参数", padding=10)
@@ -579,8 +615,10 @@ class BLEGUI:
         # 参数列表
         param_options = [
             "heartbeat", "run_interval", "show_mac", "backlight", "bg_mode",
-            "pos_label", "pos_label_x", "pos_label_y", "role_name", 
-            "role_type", "role_action", "Comp", "True_Head", "Comp_offset"
+            "pos_label", "pos_label_x", "pos_label_y", "role_name",
+            "role_type", "role_action", "role_pos", "rolename_label",
+            "rolename_label_x", "rolename_label_y", "Comp", "True_Head", "Comp_offset",
+            "start_count"
         ]
         self.param_combo = ttk.Combobox(param_select_frame, values=param_options, width=15, state="readonly")
         self.param_combo.pack(side=tk.LEFT, padx=5)
@@ -661,10 +699,48 @@ class BLEGUI:
 
     def log(self, message):
         """记录日志到UI"""
+        # 处理参数解析消息
+        if message.startswith("PARSE_PARAM:"):
+            parts = message.split(':', 2)
+            if len(parts) == 3:
+                param_name = parts[1]
+                param_value = parts[2]
+                self.root.after(0, lambda: self._update_param_value(param_name, param_value))
+            # 不再return，继续执行日志插入
+        
         self.log_text.insert(tk.END, message + "\n")
         if self.auto_scroll:
             self.log_text.see(tk.END)
         self.root.update()
+    
+    def _update_param_value(self, param_name, param_value):
+        """更新参数值输入框"""
+        # 如果是原始响应，直接填入值框
+        # if param_name == "raw_response":
+        self.param_value_entry.delete(0, tk.END)
+        self.param_value_entry.insert(0, param_value)
+        self.log(f"✓ 接收到的数据: {param_value}")
+        return
+        
+        # 检查参数是否在列表中
+        param_options = [
+            "heartbeat", "run_interval", "show_mac", "backlight", "bg_mode",
+            "pos_label", "pos_label_x", "pos_label_y", "role_name",
+            "role_type", "role_action", "role_pos", "rolename_label",
+            "rolename_label_x", "rolename_label_y", "Comp", "True_Head", "Comp_offset",
+            "start_count"
+        ]
+        
+        if param_name in param_options:
+            # 设置下拉框选中该参数
+            self.param_combo.set(param_name)
+            # 更新参数说明
+            info_text = self.get_param_info(param_name)
+            self.param_info_label.config(text=f"参数说明: {info_text}")
+            # 设置参数值
+            self.param_value_entry.delete(0, tk.END)
+            self.param_value_entry.insert(0, param_value)
+            self.log(f"✓ 已自动填入参数: {param_name} = {param_value}")
 
     def clear_log(self):
         """清空日志"""
@@ -810,6 +886,42 @@ class BLEGUI:
 
         threading.Thread(target=task, daemon=True).start()
 
+    def send_nfc_read(self):
+        """发送NFC读取命令"""
+        if not self.check_connected():
+            return
+
+        def task():
+            async def do_nfc_read():
+                await self.manager.send_nfc_read_command()
+            self.run_async(do_nfc_read())
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def send_status(self):
+        """发送获取4个状态命令"""
+        if not self.check_connected():
+            return
+
+        def task():
+            async def do_status():
+                await self.manager.send_system_command("status")
+            self.run_async(do_status())
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def send_heartbeat(self):
+        """发送设置心跳包状态值为2的命令"""
+        if not self.check_connected():
+            return
+
+        def task():
+            async def do_heartbeat():
+                await self.manager.send_set_param("heartbeat", "2")
+            self.run_async(do_heartbeat())
+
+        threading.Thread(target=task, daemon=True).start()
+
     def send_delete(self):
         """发送删除文件命令"""
         if not self.check_connected():
@@ -836,7 +948,6 @@ class BLEGUI:
             title="选择图片文件",
             filetypes=[
                 ("所有文件", "*.*"),
-                ("JPEG图片", "*.jpg"),
                 ("SJPEG图片", "*.sjpg"),
             ]
         )
@@ -888,9 +999,14 @@ class BLEGUI:
             "role_name": "角色名称 (字符串, 长度<20)",
             "role_type": "角色类型 (字符串, 长度<20)",
             "role_action": "角色行动 (字符串, 长度<20)",
+            "role_pos": "角色位置 (字符串, 长度<20)",
+            "rolename_label": "显示角色名称标签 (0=关闭, 1=开启)",
+            "rolename_label_x": "角色名称标签X坐标 (范围: 0~128)",
+            "rolename_label_y": "角色名称标签Y坐标 (范围: 0~128)",
             "Comp": "指南针方向 (只读, 0~360)",
             "True_Head": "指南针真北 (只读, 0~360)",
-            "Comp_offset": "指南针偏移 (范围: 0~360)"
+            "Comp_offset": "指南针偏移 (范围: 0~360)",
+            "start_count": "启动次数 (只读)"
         }
         return param_info.get(param_name, "未知参数")
 
@@ -928,7 +1044,7 @@ class BLEGUI:
             return
 
         # 验证只读参数
-        readonly_params = ["Comp", "True_Head", "role_pos"]
+        readonly_params = ["Comp", "True_Head"]
         if param_name in readonly_params:
             messagebox.showerror("错误", f"参数 '{param_name}' 是只读参数, 不能写入!")
             return

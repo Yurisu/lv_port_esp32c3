@@ -23,8 +23,10 @@
 
 
 
-
-
+260209:bug:
+1，加裙边，允许重叠
+2，通过蓝牙读取棋子状态
+3，实时更新图片问题
 
 
 
@@ -66,7 +68,7 @@
 | **0xEE** | 重启MCU | 0xEE 0x72 0x65 0x73 0x65 0x74 | ASCII: "reset" |
 | **0xEE** | NFC触发测量任务 | 0xEE 0x4E 0x46 0x43 | ASCII: "NFC"，等同于按键中断功能 |
 | **0xEE** | 禁止睡眠 | 0xEE 0x70 0x6D 0x5F 0x63 | ASCII:("pm_c")
-
+status触发命令：0xEE 0x73 0x74 0x61 0x74 0x75 0x73 ("status")
 ---
 
 ## 三、系统参数协议（主机 → ESP32）
@@ -97,7 +99,7 @@
 | Comp | uint16_t | 0~360 | 指南针方向（只读）同时返回Comp+True_Head |
 | True_Head | uint16_t | 0~360 | 指南针真北（只读）同时返回Comp+True_Head |
 | Comp_offset | uint16_t | 0~360 | 指南针偏移 |
-| role_pos | string | 长度<20 | 角色位置(只读,实时) |
+| role_pos | string | 长度<20 | 角色位置 |
 
 **使用示例**：
 - 设置参数：`0xA1 + checksum + len(14) + "backlight=1"`
@@ -207,6 +209,9 @@
 - `NVS_KEY_ROLE_NAME` - 角色名称
 - `NVS_KEY_ROLE_TYPE` - 角色类型
 - `NVS_KEY_ROLE_ACTION` - 角色行动
+- `NVS_KEY_ROLNAME_LABEL_EN` - 角色名标签开关
+- `NVS_KEY_ROLNAME_LABEL_X` - 角色名标签x
+- `NVS_KEY_ROLNAME_LABEL_Y` - 角色名标签y
 
 ### 2. **扩展系统参数结构** (main.c:117-134)
 在 `system_params_t` 结构中新增字段：
