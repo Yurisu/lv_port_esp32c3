@@ -183,9 +183,9 @@ typedef struct {
 // 系统参数全局变量（默认值）
 static system_params_t g_sys_params = {
     .comp_offset = 0,              // 默认0度偏移
-    .run_interval = 10000,           // 默认1秒
+    .run_interval = 10000,           // 默认10秒
     .backlight_enable = 1,        // 默认开启
-    .bg_image_mode = 1,           // 默认1张128*128
+    .bg_image_mode = 0,           // 默认1张128*128
     .show_mac = 1,              // 默认显示
     .pos_label_enable = 1,     // 默认1
     .pos_label_x = 36+64,            // 默认
@@ -1302,6 +1302,12 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         if (strlen(value) > 0 && strlen(value) < 20) {
             strncpy(g_sys_params.role_type, value, 19);
             g_sys_params.role_type[19] = '\0';
+            
+            char bg_img_path[35];
+            snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
+            lv_img_set_src(bg_img, bg_img_path);
+            ESP_LOGI(NFC_DATA_TAG, "Role type set to: %s", g_sys_params.role_type);
+
             param_changed = true;
             
             // 更新背景图片
@@ -1318,6 +1324,12 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         if (strlen(value) > 0 && strlen(value) < 20) {
             strncpy(g_sys_params.role_action, value, 19);
             g_sys_params.role_action[19] = '\0';
+
+            char bom_img_path[35];
+            snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.role_action);
+            lv_img_set_src(bom_img, bom_img_path);
+            ESP_LOGI(NFC_DATA_TAG, "Role action set to: %s", g_sys_params.role_action);
+
             param_changed = true;
             
             // 更新角色行动图片
