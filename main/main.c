@@ -102,6 +102,8 @@
 #define BATTERY_REPORT_SIZE 1
 #define HIDD_DEVICE_NAME      "VSchess-"
 
+#define NFC_DATA_TAG "NFCD"
+
 
 #define I2C0_MASTER_PORT               I2C_NUM_0
 #define I2C0_MASTER_SDA_IO             GPIO_NUM_9
@@ -1302,18 +1304,13 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         if (strlen(value) > 0 && strlen(value) < 20) {
             strncpy(g_sys_params.role_type, value, 19);
             g_sys_params.role_type[19] = '\0';
+            param_changed = true;
             
             char bg_img_path[35];
             snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
             lv_img_set_src(bg_img, bg_img_path);
             ESP_LOGI(NFC_DATA_TAG, "Role type set to: %s", g_sys_params.role_type);
 
-            param_changed = true;
-            
-            // 更新背景图片
-            char bg_img_path[35];
-            snprintf(bg_img_path, sizeof(bg_img_path), "A:/%s", g_sys_params.role_type);
-            lv_img_set_src(bg_img, bg_img_path);
             
         } else {
             ESP_LOGE("CMDp", "Invalid role_type value: %s (length=%d)", value, (int)strlen(value));
@@ -1324,18 +1321,12 @@ static esp_err_t handle_set_param_frame(const uint8_t *data, uint16_t length) {
         if (strlen(value) > 0 && strlen(value) < 20) {
             strncpy(g_sys_params.role_action, value, 19);
             g_sys_params.role_action[19] = '\0';
+            param_changed = true;
 
             char bom_img_path[35];
             snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.role_action);
             lv_img_set_src(bom_img, bom_img_path);
             ESP_LOGI(NFC_DATA_TAG, "Role action set to: %s", g_sys_params.role_action);
-
-            param_changed = true;
-            
-            // 更新角色行动图片
-            char bom_img_path[35];
-            snprintf(bom_img_path, sizeof(bom_img_path), "A:/%s", g_sys_params.role_action);
-            lv_img_set_src(bom_img, bom_img_path);
             
         } else {
             ESP_LOGE("CMDp", "Invalid role_action value: %s (length=%d)", value, (int)strlen(value));
@@ -1636,7 +1627,6 @@ static esp_err_t start_write_card_task(void)
 // 参数：
 //       card_uid - 卡片UID（7字节）
 //       card_data - NFC卡片数据（16字节）
-#define NFC_DATA_TAG "NFCD"
 static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data)
 {
     if (card_data == NULL) {
@@ -2344,35 +2334,6 @@ _Noreturn void app_main(void) {
     BG_EN(1);
     
 
-  // 自动创建任务，按键触发
-  //xTaskCreatePinnedToCore(i2c0_mmc56x3_task,MMC_TASK_NAME,MMC_TASK_STACK_SIZE,NULL,MMC_TASK_PRIORITY,NULL,0);
-
-    // // 中断后半段触发队列
-    // gpio_evt_queue = xQueueCreate(1, sizeof(uint32_t));
-    // // 创建失败断言
-    // configASSERT(gpio_evt_queue != NULL);
-
-    // // 按键中断后半段处理任务
-    // xTaskCreatePinnedToCore(
-    //     key_task_handler,
-    //     KEY_ISR_TASK_NAME,
-    //     KEY_ISR_TASK_STACK_SIZE,
-    //     NULL,               // 参数
-    //     KEY_ISR_TASK_PRIORITY,
-    //     NULL,               // 句柄
-    //     0                   
-    // );
-
-//   xTaskCreate(PrintChipInfo, "PrintChipInfo", 1024 * 4, NULL, 1, NULL);
-//   fflush(stdout);
-//   {
-//     TaskHandle_t print_chip_info_handle = xTaskGetHandle("PrintChipInfo");
-//     if (print_chip_info_handle != NULL) {
-//       vTaskDelete(print_chip_info_handle);
-//       ESP_LOGI("app_main", "Task PrintChipInfo delete.");
-//     }
-//   }
-
 
     esp_err_t ret;
 
@@ -2556,29 +2517,6 @@ vTaskDelay(pdMS_TO_TICKS(100));
   lv_indev_drv_register(&indev_drv);
 #endif
 
-//   const esp_timer_create_args_t periodic_timer_args = {
-//       .callback = &lv_tick_task, .name = "screen"};
-//   esp_timer_handle_t periodic_timer;
-//   ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-//   ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000));
-
-
-
-  // 启动 LVGL widgets demo
-  // #if LV_USE_DEMO_WIDGETS
-  //   ESP_LOGI(__FILENAME__, "Starting LVGL Widgets Demo");
-  //   lv_demo_widgets();
-  // #else
-  //   // 如果没有启用 demo widgets，显示简单的 Hello world
-  //   lv_obj_t *label = lv_label_create(lv_scr_act());
-  //   if (NULL != label) {
-  //     lv_label_set_text(label, "Hello world\nLV_USE_DEMO_WIDGETS is disabled.\nEnable it in menuconfig.");
-  //     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-  //   }
-  // #endif
-
-
-
     
     ESP_LOGI("SYS", "Run interval: %d ms", g_sys_params.run_interval);
 
@@ -2660,22 +2598,12 @@ vTaskDelay(pdMS_TO_TICKS(100));
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    //ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
     g_task_running = 1;
 
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());   
     
-
-    if(g_sys_params.backlight_enable==0)  {
-        BG_EN(0);
-        load_system_params_from_nvs();
-        g_sys_params.backlight_enable=1;
-        BG_EN(1);
-    }
-
-
-
     // 背光控制
     BG_EN(g_sys_params.backlight_enable);
     if(gpio_get_level(GPIO_INTERRUPT_PIN)) {
