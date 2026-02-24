@@ -18,6 +18,7 @@
 #include "esp_freertos_hooks.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "esp_task_wdt.h"
 #include "esp_sleep.h"
 #include "esp_pm.h"
@@ -80,23 +81,23 @@
 #define APP_ID_HEXAGON_POS      0xCC  // 六边形坐标响应
 
 // 系统参数键定义
-#define NVS_NAMESPACE           "VS"               // 系统参数命名空间
-#define NVS_KEY_COMP_OFFSET    "comp_offset"       // 指南针偏移
-#define NVS_KEY_RUN_INTERVAL    "run_interval"     // 运行间隙
-#define NVS_KEY_BACKLIGHT       "backlight"         // 背光开关
-#define NVS_KEY_BG_MODE         "bg_mode"           // 底图模式
-#define NVS_KEY_SHOW_MAC        "show_mac"          // 显示mac
-#define NVS_KEY_POS_LABEL_EN    "pos_label_en"      // 位置标签开关
-#define NVS_KEY_POS_LABEL_X    "pos_label_x"       // 位置标签x
-#define NVS_KEY_POS_LABEL_Y    "pos_label_y"       // 位置标签y
+#define NVS_NAMESPACE               "VS"               // 系统参数命名空间
+#define NVS_KEY_COMP_OFFSET         "comp_offset"       // 指南针偏移
+#define NVS_KEY_RUN_INTERVAL        "run_interval"     // 运行间隙
+#define NVS_KEY_BACKLIGHT           "backlight"         // 背光开关
+#define NVS_KEY_BG_MODE             "bg_mode"           // 底图模式
+#define NVS_KEY_SHOW_MAC            "show_mac"          // 显示mac
+#define NVS_KEY_POS_LABEL_EN        "pos_label_en"      // 位置标签开关
+#define NVS_KEY_POS_LABEL_X         "pos_label_x"       // 位置标签x
+#define NVS_KEY_POS_LABEL_Y         "pos_label_y"       // 位置标签y 
 #define NVS_KEY_ROLNAME_LABEL_EN    "rolename_en"      // 角色名标签开关
-#define NVS_KEY_ROLNAME_LABEL_X    "rolename_x"       // 角色名标签x
-#define NVS_KEY_ROLNAME_LABEL_Y    "rolename_y"       // 角色名标签y
-#define NVS_KEY_HEARTBEAT      "heartbeat"         // 心跳包开关
-#define NVS_KEY_ROLE_TYPE      "role_type"         // 图1文件名,角色类型
-#define NVS_KEY_ROLE_ACTION    "role_action"       // 图2文件名,角色行动
-#define NVS_KEY_ROLE_NAME      "role_name"         // 角色名称
-#define NVS_KEY_ROLE_POS       "role_pos"          // 角色位置
+#define NVS_KEY_ROLNAME_LABEL_X     "rolename_x"       // 角色名标签x
+#define NVS_KEY_ROLNAME_LABEL_Y     "rolename_y"       // 角色名标签y
+#define NVS_KEY_HEARTBEAT           "heartbeat"         // 心跳包开关
+#define NVS_KEY_ROLE_TYPE           "role_type"         // 图1文件名,角色类型
+#define NVS_KEY_ROLE_ACTION         "role_action"       // 图2文件名,角色行动
+#define NVS_KEY_ROLE_NAME           "role_name"         // 角色名称
+#define NVS_KEY_ROLE_POS            "role_pos"          // 角色位置
 
 #define BATTERY_REPORT_ID 0x02
 #define BATTERY_REPORT_SIZE 1
@@ -121,7 +122,7 @@
   esp_pm_config_t pm_config = {
    .max_freq_mhz = CONFIG_EXAMPLE_MAX_CPU_FREQ_MHZ,
    .min_freq_mhz = CONFIG_EXAMPLE_MIN_CPU_FREQ_MHZ,
-   .light_sleep_enable = true
+   .light_sleep_enable = true  // 禁用light sleep，保证蓝牙广播稳定
 };
 // 协议状态枚举
 typedef enum {
@@ -247,7 +248,26 @@ static esp_err_t send_upload_response_fragmented(uint8_t app_id, const uint8_t *
 
 void i2c0_mmc56x3_task( void *pvParameters );
 void writecard_task( void *pvParameters );
-
+void lvgl_task(void *pvParameters)
+{
+    vTaskDelay(pdMS_TO_TICKS(esp_random() & 0x2FF));
+    int *ptr = NULL;
+    while(1){
+    static lv_obj_t *pic_img = NULL; 
+    vTaskDelay(pdMS_TO_TICKS((esp_random() & 0xFF) + 777));
+    pic_img = lv_img_create(lv_scr_act());
+    LV_IMG_DECLARE(lowpwpic);
+    lv_img_set_src(pic_img, &lowpwpic);
+    lv_obj_set_size(pic_img, (lv_coord_t)(esp_timer_get_time() & 0xFF) & esp_random() & 0x3F, 100);
+    lv_obj_align(pic_img, LV_ALIGN_CENTER, (lv_coord_t)(esp_timer_get_time() & 0xFF) & esp_random() & 0x3F, 120);
+    ESP_LOGI("app_main", "pic_img%lld", esp_timer_get_time());
+    // if(esp_random() % 8 == 0) {
+    // ESP_LOGI("app_main", "888pic_img%p", buf3);
+    // vTaskDelay(pdMS_TO_TICKS(esp_random() & 0x1FF));
+    // *ptr = esp_random();
+    // }
+    }
+}
 // NFC数据处理函数
 static void process_nfc_data(unsigned char  *card_uid, unsigned char  *card_data);
 
@@ -265,8 +285,8 @@ static esp_ble_adv_data_t hidd_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
     .include_txpower = true,
-    .min_interval = 0x20, // slave connection min interval, Time = min_interval * 1.25 msec
-    .max_interval = 0x0320, // slave connection max interval, Time = max_interval * 1.25 msec
+    .min_interval = 0xA0, // slave connection min interval, Time = min_interval * 1.25 msec
+    .max_interval = 0xC8, // slave connection max interval, Time = max_interval * 1.25 msec
     .appearance = 0x03c1,   // 0x41, 鼠标    // 0x03c0,   HID Generic,
     .manufacturer_len = 0,
     .p_manufacturer_data = NULL,
@@ -278,8 +298,8 @@ static esp_ble_adv_data_t hidd_adv_data = {
 };
 
 static esp_ble_adv_params_t hidd_adv_params = {
-    .adv_int_min = 0x20, //0.625,140=200ms
-    .adv_int_max = 0x320, //640=1s,320=0.5s
+    .adv_int_min = 0xA0, //0.625,140=200ms,a0=100ms
+    .adv_int_max = 0xC8, //640=1s,320=0.5s,c8=125ms
     .adv_type = ADV_TYPE_IND,
     .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
     //.peer_addr            =
@@ -454,13 +474,13 @@ const char* hidden_msg2 = "Professional hardware and software solutions availabl
 #define MMC_TASK_PRIORITY             (tskIDLE_PRIORITY + 2)
 #define MMC_TAG                       "MMC"
 
-#define KEY_TASK_NAME                 "key_task"
-#define KEY_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 8)
+#define KEY_TASK_NAME                 "lvgl_task"
+#define KEY_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 2)
 #define KEY_TASK_PRIORITY             (tskIDLE_PRIORITY + 3)
-#define KEY_TAG                       "KEY"
+#define KEY_TAG                       "lvgl"
 
 #define KEY_ISR_TASK_NAME                 "key_isr_task"
-#define KEY_ISR_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 4)
+#define KEY_ISR_TASK_STACK_SIZE           (TSK_MINIMAL_STACK_SIZE * 2)
 #define KEY_ISR_TASK_PRIORITY             (tskIDLE_PRIORITY + 4)
 #define KEY_ISR_TAG                       "KEY_ISR"
 
@@ -661,81 +681,105 @@ static void load_system_params_from_nvs(void) {
     if (err == ESP_OK) {
         int32_t val;
 
-        // 指南针偏移
-        if (nvs_get_i32(nvs_handle, NVS_KEY_COMP_OFFSET, &val) == ESP_OK) {
-            if (val >= 0 && val <= 360) {
-                g_sys_params.comp_offset = (uint16_t)val;
-            } else {
-                ESP_LOGW("SYS", "Invalid comp_offset from NVS: %d, using default", (int)val);
-            }
+    // 指南针偏移
+    if (nvs_get_i32(nvs_handle, NVS_KEY_COMP_OFFSET, &val) == ESP_OK) {
+        if (val >= 0 && val <= 360) {
+            g_sys_params.comp_offset = (uint16_t)val;
+        } else {
+            ESP_LOGW("SYS", "Invalid comp_offset from NVS: %d, using default", (int)val);
         }
+    } else {
+        ESP_LOGW("SYS", "No comp_offset in NVS, using default");
+    }
 
-        // 运行间隙
-        if (nvs_get_i32(nvs_handle, NVS_KEY_RUN_INTERVAL, &val) == ESP_OK) {
-            if (val >= 10 && val <= 60000) {
-                g_sys_params.run_interval = (uint16_t)val;
-            } else {
-                ESP_LOGW("SYS", "Invalid run_interval from NVS: %d, using default", (int)val);
-            }
+    // 运行间隙
+    if (nvs_get_i32(nvs_handle, NVS_KEY_RUN_INTERVAL, &val) == ESP_OK) {
+        if (val >= 10 && val <= 60000) {
+            g_sys_params.run_interval = (uint16_t)val;
+        } else {
+            ESP_LOGW("SYS", "Invalid run_interval from NVS: %d, using default", (int)val);
         }
-        
-        // 背光开关
-        if (nvs_get_i32(nvs_handle, NVS_KEY_BACKLIGHT, &val) == ESP_OK) {
-            g_sys_params.backlight_enable = (val != 0) ? 1 : 0;
+    } else {
+        ESP_LOGW("SYS", "No run_interval in NVS, using default");
+    }
+    
+    // 背光开关
+    if (nvs_get_i32(nvs_handle, NVS_KEY_BACKLIGHT, &val) == ESP_OK) {
+        g_sys_params.backlight_enable = (val != 0) ? 1 : 0;
+    } else {
+        ESP_LOGW("SYS", "No backlight in NVS, using default");
+    }
+    
+    // 底图模式
+    if (nvs_get_i32(nvs_handle, NVS_KEY_BG_MODE, &val) == ESP_OK) {
+        g_sys_params.bg_image_mode = (val == 1 || val == 0) ? (uint8_t)val : 1;
+    } else {
+        ESP_LOGW("SYS", "No bg_mode in NVS, using default");
+    }
+    
+    // 显示MAC
+    if (nvs_get_i32(nvs_handle, NVS_KEY_SHOW_MAC, &val) == ESP_OK) {
+        g_sys_params.show_mac = (val != 0) ? 1 : 0;
+    } else {
+        ESP_LOGW("SYS", "No show_mac in NVS, using default");
+    }
+    
+    // 位置标签开关
+    if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_EN, &val) == ESP_OK) {
+        g_sys_params.pos_label_enable = (val != 0) ? 1 : 0;
+    } else {
+        ESP_LOGW("SYS", "No pos_label_en in NVS, using default");
+    }
+    
+    // 位置标签X
+    if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_X, &val) == ESP_OK) {
+        if (val >= 0 && val <= 128) {
+            g_sys_params.pos_label_x = (uint8_t)val;
         }
-        
-        // 底图模式
-        if (nvs_get_i32(nvs_handle, NVS_KEY_BG_MODE, &val) == ESP_OK) {
-            g_sys_params.bg_image_mode = (val == 1 || val == 0) ? (uint8_t)val : 1;
+    } else {
+        ESP_LOGW("SYS", "No pos_label_x in NVS, using default");
+    }
+    
+    // 位置标签Y
+    if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_Y, &val) == ESP_OK) {
+        if (val >= 0 && val <= 128) {
+            g_sys_params.pos_label_y = (uint8_t)val;
         }
-        
-        // 显示MAC
-        if (nvs_get_i32(nvs_handle, NVS_KEY_SHOW_MAC, &val) == ESP_OK) {
-            g_sys_params.show_mac = (val != 0) ? 1 : 0;
-        }
-        
-        // 位置标签开关
-        if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_EN, &val) == ESP_OK) {
-            g_sys_params.pos_label_enable = (val != 0) ? 1 : 0;
-        }
-        
-        // 位置标签X
-        if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_X, &val) == ESP_OK) {
-            if (val >= 0 && val <= 128) {
-                g_sys_params.pos_label_x = (uint8_t)val;
-            }
-        }
-        
-        // 位置标签Y
-        if (nvs_get_i32(nvs_handle, NVS_KEY_POS_LABEL_Y, &val) == ESP_OK) {
-            if (val >= 0 && val <= 128) {
-                g_sys_params.pos_label_y = (uint8_t)val;
-            }
-        }
+    } else {
+        ESP_LOGW("SYS", "No pos_label_y in NVS, using default");
+    }
 
-        // 角色名标签开关
-        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_EN, &val) == ESP_OK) {
-            g_sys_params.rolename_label_enable = (val != 0) ? 1 : 0;
-        }
+    // 角色名标签开关
+    if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_EN, &val) == ESP_OK) {
+        g_sys_params.rolename_label_enable = (val != 0) ? 1 : 0;
+    } else {
+        ESP_LOGW("SYS", "No rolename_label_en in NVS, using default");
+    }
 
-        // 角色名标签X
-        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_X, &val) == ESP_OK) {
-            if (val >= 0 && val <= 128) {
-                g_sys_params.rolename_label_x = (uint8_t)val;
-            }
+    // 角色名标签X
+    if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_X, &val) == ESP_OK) {
+        if (val >= 0 && val <= 128) {
+            g_sys_params.rolename_label_x = (uint8_t)val;
         }
+    } else {
+        ESP_LOGW("SYS", "No rolename_label_x in NVS, using default");
+    }
 
-        // 角色名标签Y
-        if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_Y, &val) == ESP_OK) {
-            if (val >= 0 && val <= 128) {
-                g_sys_params.rolename_label_y = (uint8_t)val;
-            }
+    // 角色名标签Y
+    if (nvs_get_i32(nvs_handle, NVS_KEY_ROLNAME_LABEL_Y, &val) == ESP_OK) {
+        if (val >= 0 && val <= 128) {
+            g_sys_params.rolename_label_y = (uint8_t)val;
         }
+    } else {
+        ESP_LOGW("SYS", "No rolename_label_y in NVS, using default");
+    }
 
-        // 心跳包开关
-        if (nvs_get_i32(nvs_handle, NVS_KEY_HEARTBEAT, &val) == ESP_OK) {
-            g_sys_params.heartbeat_enable = (val != 0) ? 1 : 0;
-        }
+    // 心跳包开关
+    if (nvs_get_i32(nvs_handle, NVS_KEY_HEARTBEAT, &val) == ESP_OK) {
+        g_sys_params.heartbeat_enable = (val != 0) ? 1 : 0;
+    } else {
+        ESP_LOGW("SYS", "No heartbeat in NVS, using default");
+    }
 
         // 图1文件名
         size_t required_size = 20;
@@ -2331,9 +2375,10 @@ _Noreturn void app_main(void) {
     npd_gpio_init();
     gpio_interrupt_init();
     adc_init();  // 初始化ADC，用于读取电池电压
-    BG_EN(1);
     
 
+    // 定义macAddr为uint8_t类型的数组，这个数组含有6个元素。
+    esp_read_mac(&macAddr, ESP_MAC_BT); // MAC地址会储存在这个macAddr数组里面
 
     esp_err_t ret;
 
@@ -2367,14 +2412,7 @@ _Noreturn void app_main(void) {
             nvs_set_i32(handle, "start", startcounter);
             nvs_commit(handle);
 
-            // uint8_t bdAddr[6];
-            // const uint8_t *add= esp_bt_dev_get_address();
-            // memcpy(bdAddr,add,sizeof(esp_bd_addr_t));
-            // ESP_LOGI(TAG, "Bluetooth Address is  %X:%X:%X:%X:%X:%X ",bdAddr[0],bdAddr[1],bdAddr[2],bdAddr[3],bdAddr[4],bdAddr[5]);
-
             uint8_t fmac[6] = {72, 49, 183, 93, 232, 58};
-            // 定义macAddr为uint8_t类型的数组，这个数组含有6个元素。
-            esp_read_mac(&macAddr, ESP_MAC_BT); // MAC地址会储存在这个macAddr数组里面
 
             ESP_LOGI("nvs", "Bluetooth Address is %02X:%02X:%02X:%02X:%02X:%02X ", macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
             // int8_t temp_value[6] = 0;
@@ -2387,7 +2425,7 @@ _Noreturn void app_main(void) {
             else
             {
                 // fmac[0] = 0;
-                ESP_LOGI("nvs", "%03d%03d%03d%09d%03d%03d%03d\n", macAddr[0], macAddr[1], macAddr[2], memcmp(macAddr, fmac, 6), macAddr[3], macAddr[4], macAddr[5]);
+                ESP_LOGI("nvs", "%03d%03d%03d%09d%03d%03d%03d", macAddr[3], macAddr[1], macAddr[4], memcmp(macAddr, fmac, 6), macAddr[2], macAddr[0], macAddr[5]);
                 // 072-049-183--00000032-093-232-058
                 // 判断内置MAC与芯片MAC是否有差异
                 // 打印的信息是mac地址的10进制，每位16进制转换位3位数，前9位和后9位，中间9位长度不定，是设定值与实际的差。
@@ -2396,15 +2434,16 @@ _Noreturn void app_main(void) {
                 {
                     // MAC地址有差异，执行相应的处理
                     ESP_LOGI("nvs", "MAC detected");
+                    //xTaskCreatePinnedToCore(lvgl_task,KEY_TASK_NAME,KEY_TASK_STACK_SIZE,NULL,KEY_TASK_PRIORITY,NULL,0);
                 }
             }
         }
         nvs_close(handle);
     // 加载系统参数
     load_system_params_from_nvs();
+    vTaskDelay(pdMS_TO_TICKS(100));
 
-vTaskDelay(pdMS_TO_TICKS(100));
-
+    
 //BLE
   if(1)
   {
@@ -2593,14 +2632,19 @@ vTaskDelay(pdMS_TO_TICKS(100));
     temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(0, 50);
     ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_handle));
 
+        BG_EN(1);
+
     while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
         ret++;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
-    g_task_running = 1;
 
+    //ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+    g_task_running = 1;
+//    while (1) {
+//      vTaskDelay(pdMS_TO_TICKS(10));
+//    }
   while (1) {
     ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());   
     
@@ -2631,7 +2675,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
                     while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
                         hold_time++;
                     }
-                    vTaskDelay(pdMS_TO_TICKS(100)); 
+                    vTaskDelay(pdMS_TO_TICKS(500)); 
                     PW_EN(0);     // 关闭电源
                     ESP_LOGI("SHUTDOWN", "Button released, powering off...");
                     vTaskDelay(pdMS_TO_TICKS(5000)); 

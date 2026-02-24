@@ -1,3 +1,2 @@
-echo COM5...
-C:\.espressif\python_env\idf5.3_py3.11_env\Scripts\python.exe C:\esp\v5.3.4\esp-idf\components\esptool_py\esptool\esptool.py -p COM5 -b 460800 --before default_reset --after hard_reset --chip esp32c3 write_flash --flash_mode dio --flash_freq 80m --flash_size 4MB 0x0 bootloader.bin 0x10000 lvgl-demo.bin 0x8000 partition-table.bin 
+C:\.espressif\python_env\idf5.3_py3.11_env\Scripts\python.exe C:\esp\v5.3.4\esp-idf\components\esptool_py\esptool\esptool.py -p COM24 -b 460800 --before default_reset --after hard_reset --chip esp32c3 write_flash --flash_mode dio --flash_freq 80m --flash_size 4MB 0x0 bootloader.bin 0x10000 lvgl-demo.bin 0x8000 partition-table.bin 
 pause
