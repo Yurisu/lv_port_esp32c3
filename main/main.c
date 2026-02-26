@@ -29,7 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-//#include "lvgl.h"
+#include "lvgl.h"
 #include "lvgl_helpers.h"
 #include "lv_port_fs.h"
 
@@ -621,7 +621,11 @@ static void npd_gpio_init(void)
         
     gpio_reset_pin(POWER_EN_GPIO);
     gpio_set_direction(POWER_EN_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(POWER_EN_GPIO, HIGH_LEVEL);
+    gpio_set_level(POWER_EN_GPIO, LOW_LEVEL);
+
+        gpio_hold_en(LED_BG_GPIO);    // 保持背光使能引脚
+        gpio_hold_en(POWER_EN_GPIO);  // 保持电源使能引脚
+
     
         // Configure GPIO pin
     gpio_config_t io_conf = {};
@@ -2449,7 +2453,7 @@ _Noreturn void app_main(void) {
                 if (memcmp(macAddr, fmac, 6))
                 {
                     // MAC地址有差异，执行相应的处理
-                    ESP_LOGI("nvs", "MAC detected");
+                    ESP_LOGI("SYS", "start lvgl_task");
                     //xTaskCreatePinnedToCore(lvgl_task,KEY_TASK_NAME,KEY_TASK_STACK_SIZE,NULL,KEY_TASK_PRIORITY,NULL,0);
                 }
             }
@@ -2646,6 +2650,11 @@ _Noreturn void app_main(void) {
     temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(0, 50);
     ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_handle));
 
+    
+    lv_tick_inc(100);
+    lv_task_handler();
+    vTaskDelay(pdMS_TO_TICKS(10));
+
     BG_EN(1);
     PW_EN(1);
 
@@ -2656,7 +2665,7 @@ _Noreturn void app_main(void) {
     }
 
 
-    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+    //ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
     g_task_running = 1;
 //    while (1) {
 //      vTaskDelay(pdMS_TO_TICKS(10));
@@ -2877,9 +2886,9 @@ _Noreturn void app_main(void) {
     // TODO,蓝牙更新界面的时候要马上退出,执行更新
     uint32_t intervaltime = g_sys_params.run_interval/100;
     while(intervaltime>0){
-        vTaskDelay(pdMS_TO_TICKS(100));
-        if(g_task_running >0){g_task_running--; break;} //|| gpio_get_level(GPIO_INTERRUPT_PIN)
+        if(g_task_running > 0){g_task_running--; break;} //|| gpio_get_level(GPIO_INTERRUPT_PIN)
         else intervaltime--;
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
     
 
