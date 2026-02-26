@@ -2876,9 +2876,9 @@ _Noreturn void app_main(void) {
 
     // TODO,蓝牙更新界面的时候要马上退出,执行更新
     uint32_t intervaltime = g_sys_params.run_interval/100;
-    while(intervaltime){
+    while(intervaltime>0){
         vTaskDelay(pdMS_TO_TICKS(100));
-        if(g_task_running ){g_task_running--; break;} //|| gpio_get_level(GPIO_INTERRUPT_PIN)
+        if(g_task_running >0){g_task_running--; break;} //|| gpio_get_level(GPIO_INTERRUPT_PIN)
         else intervaltime--;
     }
     
