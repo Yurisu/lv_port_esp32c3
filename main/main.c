@@ -29,7 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "lvgl.h"
+//#include "lvgl.h"
 #include "lvgl_helpers.h"
 #include "lv_port_fs.h"
 
@@ -122,7 +122,7 @@
   esp_pm_config_t pm_config = {
    .max_freq_mhz = CONFIG_EXAMPLE_MAX_CPU_FREQ_MHZ,
    .min_freq_mhz = CONFIG_EXAMPLE_MIN_CPU_FREQ_MHZ,
-   .light_sleep_enable = true  // 禁用light sleep，保证蓝牙广播稳定
+   .light_sleep_enable = true  
 };
 // 协议状态枚举
 typedef enum {
@@ -285,21 +285,21 @@ static esp_ble_adv_data_t hidd_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
     .include_txpower = true,
-    .min_interval = 0xA0, // slave connection min interval, Time = min_interval * 1.25 msec
-    .max_interval = 0xC8, // slave connection max interval, Time = max_interval * 1.25 msec
+    .min_interval = 40, // slave connection min interval, Time = min_interval * 1.25 msec
+    .max_interval = 640, // slave connection max interval, Time = max_interval * 1.25 msec
     .appearance = 0x03c1,   // 0x41, 鼠标    // 0x03c0,   HID Generic,
-    .manufacturer_len = 0,
-    .p_manufacturer_data = NULL,
-    .service_data_len = 0,
-    .p_service_data = NULL,
-    .service_uuid_len = 0,//sizeof(hidd_service_uuid128),
-    .p_service_uuid = NULL,//hidd_service_uuid128,
-    .flag = 0x6,
+    // .manufacturer_len = 0,
+    // .p_manufacturer_data = NULL,
+    // .service_data_len = 0,
+    // .p_service_data = NULL,
+    // .service_uuid_len = 0,//sizeof(hidd_service_uuid128),
+    // .p_service_uuid = NULL,//hidd_service_uuid128,
+    // .flag = 0x6,
 };
 
 static esp_ble_adv_params_t hidd_adv_params = {
-    .adv_int_min = 0xA0, //0.625,140=200ms,a0=100ms
-    .adv_int_max = 0xC8, //640=1s,320=0.5s,c8=125ms
+    .adv_int_min = 320, //0.625,320=200ms,a0=100ms
+    .adv_int_max = 320, //640=0.4s,320=0.2s,c8=125ms
     .adv_type = ADV_TYPE_IND,
     .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
     //.peer_addr            =
@@ -307,12 +307,6 @@ static esp_ble_adv_params_t hidd_adv_params = {
     .channel_map = ADV_CHNL_ALL,
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
 };
-
-// 测量函数参数
-// 按键中断队列句柄（全局）
-//static QueueHandle_t gpio_evt_queue = NULL;
-// 原子操作保护的任务运行标志
-// static portATOMIC_TYPE g_task_running = 0;
 
 
 
@@ -2371,14 +2365,36 @@ static void process_protocol_data(const uint8_t *data, uint16_t length) {
 
 _Noreturn void app_main(void) {
 
-    IIC_init();
     npd_gpio_init();
+
+    if(gpio_get_level(GPIO_INTERRUPT_PIN)) {
+        vTaskDelay(pdMS_TO_TICKS(100)); 
+        if(gpio_get_level(GPIO_INTERRUPT_PIN)) {
+            PW_EN(1);
+        }
+        else
+        {
+            PW_EN(0);
+            vTaskDelay(pdMS_TO_TICKS(1000)); 
+
+        }
+    }
+    else
+    {
+        PW_EN(0);
+        vTaskDelay(pdMS_TO_TICKS(1000)); 
+    }
+
+    
+
+
+    IIC_init();
     gpio_interrupt_init();
     adc_init();  // 初始化ADC，用于读取电池电压
     
 
     // 定义macAddr为uint8_t类型的数组，这个数组含有6个元素。
-    esp_read_mac(&macAddr, ESP_MAC_BT); // MAC地址会储存在这个macAddr数组里面
+    esp_read_mac(macAddr, ESP_MAC_BT); // MAC地址会储存在这个macAddr数组里面
 
     esp_err_t ret;
 
@@ -2481,7 +2497,7 @@ _Noreturn void app_main(void) {
           //return;
       }
 
-      if ((ret = esp_hidd_profile_init()) != ESP_OK)
+       if ((ret = esp_hidd_profile_init()) != ESP_OK)
       {
           ESP_LOGE("BLEinit", "%s init bluedroid failed", __func__);
       }
@@ -2511,8 +2527,6 @@ _Noreturn void app_main(void) {
     }
 
      vTaskDelay(pdMS_TO_TICKS(100));
-
-
 
 
 
@@ -2632,21 +2646,23 @@ _Noreturn void app_main(void) {
     temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(0, 50);
     ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_handle));
 
-        BG_EN(1);
+    BG_EN(1);
+    PW_EN(1);
 
-    while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
-        ret++;
+    ret = 1000;
+    while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1 && ret > 0) {
+        ret--;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
 
-    //ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
     g_task_running = 1;
 //    while (1) {
 //      vTaskDelay(pdMS_TO_TICKS(10));
 //    }
   while (1) {
-    ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());   
+    //ESP_LOGI("app_main", "Free Heap Size: %lu", esp_get_minimum_free_heap_size());   
     
     // 背光控制
     BG_EN(g_sys_params.backlight_enable);
@@ -2675,9 +2691,9 @@ _Noreturn void app_main(void) {
                     while (gpio_get_level(GPIO_INTERRUPT_PIN) == 1) {
                         hold_time++;
                     }
+                    ESP_LOGI("SHUTDOWN", "Button released, powering off...");
                     vTaskDelay(pdMS_TO_TICKS(500)); 
                     PW_EN(0);     // 关闭电源
-                    ESP_LOGI("SHUTDOWN", "Button released, powering off...");
                     vTaskDelay(pdMS_TO_TICKS(5000)); 
                     // 芯片会自然断电（因为 PW_EN 已经关闭）
                     g_task_running = 0;
@@ -2855,14 +2871,14 @@ _Noreturn void app_main(void) {
     lv_tick_inc(100);
     lv_task_handler();
     
-
+//vTaskDelay(pdMS_TO_TICKS(100));
     
 
     // TODO,蓝牙更新界面的时候要马上退出,执行更新
-    uint32_t intervaltime = g_sys_params.run_interval/20;
+    uint32_t intervaltime = g_sys_params.run_interval/100;
     while(intervaltime){
-        vTaskDelay(pdMS_TO_TICKS(20));
-        if(g_task_running || gpio_get_level(GPIO_INTERRUPT_PIN)){g_task_running--; break;}
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if(g_task_running ){g_task_running--; break;} //|| gpio_get_level(GPIO_INTERRUPT_PIN)
         else intervaltime--;
     }
     

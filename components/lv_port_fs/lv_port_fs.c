@@ -40,7 +40,7 @@ static lv_fs_res_t fs_seek(lv_fs_drv_t * drv, void * file_p, uint32_t pos, lv_fs
 static lv_fs_res_t fs_tell(lv_fs_drv_t * drv, void * file_p, uint32_t * pos_p);
 
 static void * fs_dir_open(lv_fs_drv_t * drv, const char * path);
-static lv_fs_res_t fs_dir_read(lv_fs_drv_t * drv, void * rddir_p, char * fn, uint32_t fn_len);
+static lv_fs_res_t fs_dir_read(lv_fs_drv_t * drv, void * rddir_p, char * fn);//, uint32_t fn_len); //lvgl9
 static lv_fs_res_t fs_dir_close(lv_fs_drv_t * drv, void * rddir_p);
 
 /**
@@ -299,7 +299,7 @@ static void * fs_dir_open(lv_fs_drv_t * drv, const char * path)
  *  - 返回 LV_FS_RES_OK 或 LV_FS_RES_UNKNOWN
  */
 static lv_fs_res_t fs_dir_read(lv_fs_drv_t * drv, void * rddir_p,
-                               char * fn, uint32_t fn_len)
+                               char * fn)//, uint32_t fn_len) //lvgl9
 {
     LV_UNUSED(drv);
     if (!rddir_p) return LV_FS_RES_UNKNOWN;
@@ -309,8 +309,11 @@ static lv_fs_res_t fs_dir_read(lv_fs_drv_t * drv, void * rddir_p,
         fn[0] = '\0';  // LVGL 要求读完返回空字符串
         return LV_FS_RES_OK;
     }
-    strncpy(fn, entry->d_name, fn_len - 1);
-    fn[fn_len - 1] = '\0';
+    //strncpy(fn, entry->d_name, fn_len - 1);
+    //fn[fn_len - 1] = '\0';
+    strncpy(fn, entry->d_name, LV_FS_MAX_FN_LENGTH - 1); //lvgl9
+    fn[LV_FS_MAX_FN_LENGTH - 1] = '\0'; //lvgl9
+
     return LV_FS_RES_OK;
 }
 
